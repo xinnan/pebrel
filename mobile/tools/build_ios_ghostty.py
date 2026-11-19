@@ -38,11 +38,13 @@ ZIG_MACOS_PINS = {
 SLICES = {
     "ios-arm64": {
         "zig_target": "aarch64-ios.{ver}",
+        "zig_cpu": "baseline",
         "sdk": "iphoneos",
         "clang_target": "arm64-apple-ios{ver}",
     },
     "ios-arm64-simulator": {
         "zig_target": "aarch64-ios.{ver}-simulator",
+        "zig_cpu": "apple_m1",
         "sdk": "iphonesimulator",
         "clang_target": "arm64-apple-ios{ver}-simulator",
     },
@@ -142,7 +144,7 @@ def main() -> None:
                 "-Demit-xcframework=false",
                 "-Doptimize=ReleaseFast",
                 f"-Dtarget={zig_target}",
-                "-Dcpu=baseline",
+                f"-Dcpu={spec['zig_cpu']}",
                 "--prefix",
                 str(prefix),
                 "--cache-dir",
