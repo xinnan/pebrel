@@ -26,6 +26,7 @@ final class DesktopRuntimeClient {
     private var nextRequestId: Int64 = 1
     private var pending: [String: CheckedContinuation<[String: Any], Error>] = [:]
     private var readyContinuation: CheckedContinuation<[String: Any], Error>?
+    private var pendingReadyMessages: [[String: Any]] = []
     private var firstSnapshotContinuation: CheckedContinuation<DesktopSnapshot, Error>?
 
     private(set) var capabilities = DesktopCapabilities()
@@ -193,6 +194,7 @@ final class DesktopRuntimeClient {
         pending.removeAll()
         let readyCont = readyContinuation
         readyContinuation = nil
+        pendingReadyMessages.removeAll()
         let snapCont = firstSnapshotContinuation
         firstSnapshotContinuation = nil
         lock.unlock()
@@ -213,32 +215,46 @@ final class DesktopRuntimeClient {
         var timeout = timeoutSeconds
         while true {
             let currentTimeout = timeout
-            let box: JsonDictBox = try await withThrowingTaskGroup(of: JsonDictBox.self) { group in
-                group.addTask { [weak self] in
-                    let dict: [String: Any] = try await withCheckedThrowingContinuation { cont in
-                        guard let self else { cont.resume(throwing: DesktopFailure(.disconnected)); return }
-                        self.lock.lock()
-                        if self.isClosed {
+            let msg: [String: Any]
+            lock.lock()
+            if !pendingReadyMessages.isEmpty {
+                msg = pendingReadyMessages.removeFirst()
+                lock.unlock()
+            } else {
+                lock.unlock()
+                let box: JsonDictBox = try await withThrowingTaskGroup(of: JsonDictBox.self) { group in
+                    group.addTask { [weak self] in
+                        let dict: [String: Any] = try await withCheckedThrowingContinuation { cont in
+                            guard let self else { cont.resume(throwing: DesktopFailure(.disconnected)); return }
+                            self.lock.lock()
+                            if !self.pendingReadyMessages.isEmpty {
+                                let queued = self.pendingReadyMessages.removeFirst()
+                                self.lock.unlock()
+                                cont.resume(returning: queued)
+                                return
+                            }
+                            if self.isClosed {
+                                self.lock.unlock()
+                                cont.resume(throwing: DesktopFailure(.disconnected))
+                                return
+                            }
+                            self.readyContinuation = cont
                             self.lock.unlock()
-                            cont.resume(throwing: DesktopFailure(.disconnected))
-                            return
                         }
-                        self.readyContinuation = cont
-                        self.lock.unlock()
+                        return JsonDictBox(value: dict)
                     }
-                    return JsonDictBox(value: dict)
+                    group.addTask { [weak self] in
+                        try await Task.sleep(nanoseconds: UInt64(currentTimeout * 1_000_000_000))
+                        let kind = self?.transport.readyTimeoutFailure() ?? .timeout
+                        self?.disconnect(kind: kind)
+                        throw DesktopFailure(kind)
+                    }
+                    guard let value = try await group.next() else { throw DesktopFailure(.timeout) }
+                    group.cancelAll()
+                    return value
                 }
-                group.addTask { [weak self] in
-                    try await Task.sleep(nanoseconds: UInt64(currentTimeout * 1_000_000_000))
-                    let kind = self?.transport.readyTimeoutFailure() ?? .timeout
-                    self?.disconnect(kind: kind)
-                    throw DesktopFailure(kind)
-                }
-                guard let value = try await group.next() else { throw DesktopFailure(.timeout) }
-                group.cancelAll()
-                return value
+                msg = box.value
             }
-            let msg = box.value
 
             if (msg["type"] as? String) == "mobile.approval" {
                 let code = msg["code"] as? String ?? ""
@@ -299,10 +315,16 @@ final class DesktopRuntimeClient {
             switch type {
             case "mobile.ready", "mobile.approval":
                 lock.lock()
-                let cont = readyContinuation
-                readyContinuation = nil
-                lock.unlock()
-                cont?.resume(returning: msg)
+                if let cont = readyContinuation {
+                    readyContinuation = nil
+                    lock.unlock()
+                    cont.resume(returning: msg)
+                } else if !isClosed {
+                    pendingReadyMessages.append(msg)
+                    lock.unlock()
+                } else {
+                    lock.unlock()
+                }
                 return
             case "mobile.disconnected":
                 disconnect(kind: .runtimeUnavailable)

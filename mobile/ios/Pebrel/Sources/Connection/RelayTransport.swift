@@ -1,5 +1,40 @@
 import Foundation
 
+private final class WebSocketOpenGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var settled = false
+    private var earlyResult: Result<Void, Error>?
+
+    func setContinuation(_ cont: CheckedContinuation<Void, Error>) {
+        lock.lock()
+        if settled, let earlyResult {
+            self.earlyResult = nil
+            lock.unlock()
+            cont.resume(with: earlyResult)
+            return
+        }
+        continuation = cont
+        lock.unlock()
+    }
+
+    func resolve(_ result: Result<Void, Error>) {
+        lock.lock()
+        if settled {
+            lock.unlock()
+            return
+        }
+        settled = true
+        let cont = continuation
+        continuation = nil
+        if cont == nil {
+            earlyResult = result
+        }
+        lock.unlock()
+        cont?.resume(with: result)
+    }
+}
+
 /// WebSocket transport supporting both v1 JSON relay and v2 E2EE Noise relay/LAN endpoints.
 final class RelayTransport: NSObject, DesktopTransport {
     let initialProfile: RelayProfile
@@ -75,25 +110,37 @@ final class RelayTransport: NSObject, DesktopTransport {
             )
         }
 
-        ws.resume()
-
-        // Verify initial connection via ping before entering steady-state receive loop.
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            ws.sendPing { [weak self] error in
-                if let error {
-                    if let pinErr = self?.tlsDelegate?.pinFailure {
-                        continuation.resume(throwing: DesktopFailure(pinErr))
-                    } else if let httpResponse = ws.response as? HTTPURLResponse, httpResponse.statusCode != 101 {
-                        continuation.resume(throwing: DesktopFailure(DesktopFailureClassifier.fromHttpStatus(httpResponse.statusCode)))
-                    } else {
-                        continuation.resume(throwing: DesktopFailure(DesktopFailureClassifier.classify(error, relayReached: false)))
-                    }
-                } else {
-                    self?.relayReached = true
-                    continuation.resume()
-                }
+        // Wait for actual WebSocket HTTP 101 upgrade completion via URLSessionWebSocketDelegate
+        // instead of sending a premature Ping frame before the server finishes authentication setup.
+        let openGate = WebSocketOpenGate()
+        delegate.onWebSocketOpen = { [weak self] in
+            self?.relayReached = true
+            openGate.resolve(.success(()))
+        }
+        delegate.onTaskComplete = { [weak self] error, httpResponse in
+            if let pinErr = self?.tlsDelegate?.pinFailure {
+                openGate.resolve(.failure(DesktopFailure(pinErr)))
+            } else if let status = httpResponse?.statusCode, status != 101 {
+                openGate.resolve(.failure(DesktopFailure(DesktopFailureClassifier.fromHttpStatus(status))))
+            } else if let error {
+                openGate.resolve(.failure(DesktopFailure(DesktopFailureClassifier.classify(error, relayReached: false))))
+            } else {
+                openGate.resolve(.failure(DesktopFailure(.disconnected)))
             }
         }
+
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                openGate.setContinuation(continuation)
+                ws.resume()
+            }
+        } onCancel: { [weak self] in
+            openGate.resolve(.failure(DesktopFailure(.disconnected)))
+            self?.close()
+        }
+
+        delegate.onWebSocketOpen = nil
+        delegate.onTaskComplete = nil
 
         startHeartbeat()
         startReceiving()

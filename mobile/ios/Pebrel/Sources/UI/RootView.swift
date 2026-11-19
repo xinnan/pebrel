@@ -37,6 +37,7 @@ struct RootView: View {
     @State private var showRelayForm = false
     @State private var showRelayDeploy = false
     @State private var showLocalShellInfo = false
+    @State private var pendingSheetAction: (() -> Void)?
 
     private var basePalette: PebrelPalette {
         PebrelThemeCatalog.shared.palette(
@@ -75,12 +76,12 @@ struct RootView: View {
             notificationDelegate.pendingDeepLink = nil
             route = .pane(desktopId: link.desktopId, windowId: link.windowId, paneId: link.paneId, processId: link.processId)
         }
-        .sheet(isPresented: $showNewConnection) {
+        .sheet(isPresented: $showNewConnection, onDismiss: runPendingSheetAction) {
             NewConnectionSheet(
-                onComputer: { showNewConnection = false; showRelayForm = true },
-                onSshHost: { showNewConnection = false; editingHost = nil; showHostForm = true },
-                onLocalShellInfo: { showNewConnection = false; showLocalShellInfo = true },
-                onDeployRelay: { showNewConnection = false; showRelayDeploy = true }
+                onComputer: { pendingSheetAction = { showRelayForm = true }; showNewConnection = false },
+                onSshHost: { pendingSheetAction = { editingHost = nil; showHostForm = true }; showNewConnection = false },
+                onLocalShellInfo: { pendingSheetAction = { showLocalShellInfo = true }; showNewConnection = false },
+                onDeployRelay: { pendingSheetAction = { showRelayDeploy = true }; showNewConnection = false }
             )
             .environment(\.pebrelPalette, activePalette)
         }
@@ -142,7 +143,7 @@ struct RootView: View {
             )
             .environment(\.pebrelPalette, activePalette)
         }
-        .sheet(isPresented: $showRelayForm) {
+        .sheet(isPresented: $showRelayForm, onDismiss: runPendingSheetAction) {
             RelayFormSheet(
                 onConnect: { rawJSON in
                     if let did = repository.importRelayInvitation(rawJSON) {
@@ -158,8 +159,8 @@ struct RootView: View {
                     route = .desktop(desktopId: did)
                 },
                 onDeploy: {
+                    pendingSheetAction = { showRelayDeploy = true }
                     showRelayForm = false
-                    showRelayDeploy = true
                 }
             )
             .environment(\.pebrelPalette, activePalette)
@@ -502,6 +503,12 @@ struct RootView: View {
         if route == .onboarding {
             repository.display.completeConnectionOnboarding()
         }
+    }
+
+    private func runPendingSheetAction() {
+        guard let action = pendingSheetAction else { return }
+        pendingSheetAction = nil
+        action()
     }
 
     private func connectHost(_ host: HostProfile, attachment: RemoteAttachment? = nil) {

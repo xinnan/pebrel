@@ -176,4 +176,130 @@ final class PebrelCoreTests: XCTestCase {
         XCTAssertEqual(SftpPaths.parent(of: "/home/u/a.txt"), "/home/u")
         XCTAssertEqual(VoiceInputController.appendVoiceDraft("ls", spoken: "-la"), "ls -la")
     }
+
+    func testPinnedLeafX509HandlesRcgenLongValidityAndSan() {
+        func derTLV(_ tag: UInt8, _ content: Data) -> Data {
+            var out = Data([tag])
+            let n = content.count
+            if n < 128 {
+                out.append(UInt8(n))
+            } else if n < 256 {
+                out.append(0x81)
+                out.append(UInt8(n))
+            } else {
+                out.append(0x82)
+                out.append(UInt8((n >> 8) & 0xFF))
+                out.append(UInt8(n & 0xFF))
+            }
+            out.append(content)
+            return out
+        }
+
+        let spki = derTLV(0x30, Data(repeating: 0xAB, count: 32))
+        let pin = "sha256/" + CryptoHelpers.sha256Base64(spki)
+        let wrongPin = "sha256/" + CryptoHelpers.sha256Base64(Data(repeating: 0xCD, count: 32))
+
+        // Match rcgen::generate_simple_self_signed: 1975-01-01 UTCTime .. 4096-01-01 GeneralizedTime, no EKU
+        let validity = derTLV(
+            0x30,
+            derTLV(0x17, Data("750101000000Z".utf8)) + derTLV(0x18, Data("40960101000000Z".utf8))
+        )
+        let ipv4 = Data([192, 168, 1, 50])
+        let ipv6 = Data([0xFD, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+        let sanNames = derTLV(
+            0x30,
+            derTLV(0x87, ipv4) + derTLV(0x87, ipv6) + derTLV(0x82, Data("*.example.com".utf8))
+        )
+        let sanExt = derTLV(
+            0x30,
+            derTLV(0x06, Data([0x55, 0x1D, 0x11])) + derTLV(0x04, sanNames)
+        )
+        let extensions = derTLV(0xA3, derTLV(0x30, sanExt))
+        let tbs = derTLV(
+            0x30,
+            derTLV(0xA0, derTLV(0x02, Data([0x02])))
+                + derTLV(0x02, Data([0x01]))
+                + derTLV(0x30, Data())
+                + derTLV(0x30, Data())
+                + validity
+                + derTLV(0x30, Data())
+                + spki
+                + extensions
+        )
+        let certDER = derTLV(0x30, tbs + derTLV(0x30, Data()) + derTLV(0x03, Data([0x00])))
+
+        let now2026: Int64 = 1_795_000_000
+        XCTAssertNil(PinnedTlsSessionDelegate.evaluatePinnedLeafDER(certDER, expectedPin: pin, expectedHost: "192.168.1.50", nowUnix: now2026))
+        XCTAssertNil(PinnedTlsSessionDelegate.evaluatePinnedLeafDER(certDER, expectedPin: pin, expectedHost: "[fd00::1]", nowUnix: now2026))
+        XCTAssertNil(PinnedTlsSessionDelegate.evaluatePinnedLeafDER(certDER, expectedPin: pin, expectedHost: "relay.example.com", nowUnix: now2026))
+        XCTAssertEqual(
+            PinnedTlsSessionDelegate.evaluatePinnedLeafDER(certDER, expectedPin: wrongPin, expectedHost: "192.168.1.50", nowUnix: now2026),
+            .certificateChanged
+        )
+        XCTAssertEqual(
+            PinnedTlsSessionDelegate.evaluatePinnedLeafDER(certDER, expectedPin: pin, expectedHost: "192.168.1.99", nowUnix: now2026),
+            .tls
+        )
+        XCTAssertEqual(
+            PinnedTlsSessionDelegate.evaluatePinnedLeafDER(certDER, expectedPin: pin, expectedHost: "192.168.1.50", nowUnix: 100),
+            .certificateDate
+        )
+    }
+
+    func testDesktopRuntimeClientQueuesEarlyApprovalAndReady() async throws {
+        let transport = EarlyApprovalTransport()
+        let client = DesktopRuntimeClient(transport: transport, allowInput: true)
+        var receivedCode: String?
+        var receivedSnapshot: DesktopSnapshot?
+        client.onApproval = { receivedCode = $0.code }
+        client.onSnapshot = { receivedSnapshot = $0 }
+
+        try await client.connect()
+        XCTAssertEqual(receivedCode, "123456")
+        XCTAssertEqual(receivedSnapshot?.processId, 42)
+        XCTAssertEqual(client.hostOs, "linux")
+        client.close()
+    }
+}
+
+private final class EarlyApprovalTransport: DesktopTransport {
+    var transportLabel: String { "LAN" }
+    var onFrame: (([String: Any]) -> Void)?
+    var onFailure: ((DesktopFailureKind) -> Void)?
+
+    func open() async throws {
+        // Simulate fast LAN delivering mobile.approval + mobile.ready BEFORE awaitReady() is called.
+        onFrame?([
+            "type": "mobile.approval",
+            "code": "123456",
+            "expiresAt": Int64(Date().timeIntervalSince1970) + 120,
+        ])
+        onFrame?([
+            "type": "mobile.ready",
+            "protocol": "pebrel.mobile.relay",
+            "version": 1,
+            "capabilities": ["snapshot": true, "input": true],
+            "host": ["os": "linux"],
+        ])
+    }
+
+    func send(_ frame: [String: Any]) async throws {
+        if let id = frame["id"] as? String, (frame["method"] as? String) == "events.subscribe" {
+            onFrame?([
+                "id": id,
+                "ok": true,
+                "result": [
+                    "snapshot": [
+                        "process_id": 42,
+                        "revision": 1,
+                        "mobile_policy": ["allow_input": true, "notifications": true],
+                        "windows": [],
+                    ],
+                ],
+            ])
+        }
+    }
+
+    func readyTimeoutFailure() -> DesktopFailureKind { .timeout }
+    func close() {}
 }

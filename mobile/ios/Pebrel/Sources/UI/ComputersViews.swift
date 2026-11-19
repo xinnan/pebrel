@@ -235,11 +235,13 @@ struct RelayFormSheet: View {
                 if RelayProfile.parse(payload) != nil {
                     scanError = nil
                     onConnect(payload)
+                    return true
                 } else {
                     scanError = L10n.tr("invalid_relay_invite")
+                    return false
                 }
             }
-            .frame(height: 260)
+            .frame(height: 300)
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -400,9 +402,9 @@ struct RelayFormSheet: View {
     }
 }
 
-/// Embedded AVFoundation on-device QR scanner.
+/// Embedded AVFoundation on-device QR scanner with macro/near-focus support for dense pairing QR codes.
 struct InlineQrScannerView: UIViewControllerRepresentable {
-    let onCode: (String) -> Void
+    let onCode: (String) -> Bool
 
     func makeUIViewController(context: Context) -> QrScannerViewController {
         let vc = QrScannerViewController()
@@ -416,28 +418,59 @@ struct InlineQrScannerView: UIViewControllerRepresentable {
 }
 
 final class QrScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
-    var onCode: ((String) -> Void)?
+    var onCode: ((String) -> Bool)?
     private let session = AVCaptureSession()
+    private let sessionQueue = DispatchQueue(label: "io.github.kuddev.pebrel.qr.camera")
+    private var captureDevice: AVCaptureDevice?
     private var previewLayer: AVCaptureVideoPreviewLayer?
+    private let statusStack = UIStackView()
     private let statusLabel = UILabel()
+    private let settingsButton = UIButton(type: .system)
+    private var isConfigured = false
     private var didEmit = false
+    private var didAccept = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
+
         statusLabel.textColor = .white
         statusLabel.numberOfLines = 0
         statusLabel.textAlignment = .center
         statusLabel.font = .preferredFont(forTextStyle: .footnote)
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(statusLabel)
+
+        settingsButton.setTitle(L10n.tr("settings"), for: .normal)
+        settingsButton.isHidden = true
+        settingsButton.addTarget(self, action: #selector(openAppSettings), for: .touchUpInside)
+
+        statusStack.axis = .vertical
+        statusStack.alignment = .center
+        statusStack.spacing = 10
+        statusStack.translatesAutoresizingMaskIntoConstraints = false
+        statusStack.addArrangedSubview(statusLabel)
+        statusStack.addArrangedSubview(settingsButton)
+        view.addSubview(statusStack)
         NSLayoutConstraint.activate([
-            statusLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            statusLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            statusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 16),
-            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -16),
+            statusStack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            statusStack.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            statusStack.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 16),
+            statusStack.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -16),
         ])
+
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleFocusTap(_:)))
+        view.addGestureRecognizer(tap)
+
         checkAndStartCamera()
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        if isConfigured && !didAccept {
+            sessionQueue.async { [weak self] in
+                guard let self, !self.session.isRunning else { return }
+                self.session.startRunning()
+            }
+        }
     }
 
     override func viewDidLayoutSubviews() {
@@ -447,8 +480,37 @@ final class QrScannerViewController: UIViewController, AVCaptureMetadataOutputOb
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.session.stopRunning()
+        sessionQueue.async { [weak self] in
+            guard let self, self.session.isRunning else { return }
+            self.session.stopRunning()
+        }
+    }
+
+    @objc private func openAppSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
+    }
+
+    @objc private func handleFocusTap(_ gesture: UITapGestureRecognizer) {
+        guard let preview = previewLayer, let device = captureDevice else { return }
+        let point = preview.captureDevicePointConverted(fromLayerPoint: gesture.location(in: view))
+        sessionQueue.async {
+            guard (try? device.lockForConfiguration()) != nil else { return }
+            if device.isFocusPointOfInterestSupported {
+                device.focusPointOfInterest = point
+            }
+            if device.isFocusModeSupported(.continuousAutoFocus) {
+                device.focusMode = .continuousAutoFocus
+            } else if device.isFocusModeSupported(.autoFocus) {
+                device.focusMode = .autoFocus
+            }
+            if device.isExposurePointOfInterestSupported {
+                device.exposurePointOfInterest = point
+            }
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+            device.unlockForConfiguration()
         }
     }
 
@@ -459,37 +521,93 @@ final class QrScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
                 DispatchQueue.main.async {
-                    if granted { self?.configureSession() }
-                    else { self?.statusLabel.text = L10n.tr("pair_camera_permission") }
+                    if granted {
+                        self?.configureSession()
+                    } else {
+                        self?.showCameraStatus(L10n.tr("pair_camera_permission"), showSettings: true)
+                    }
                 }
             }
         default:
-            statusLabel.text = L10n.tr("pair_camera_permission")
+            showCameraStatus(L10n.tr("pair_camera_permission"), showSettings: true)
         }
     }
 
+    private func showCameraStatus(_ text: String, showSettings: Bool) {
+        statusLabel.text = text
+        settingsButton.isHidden = !showSettings
+        statusStack.isHidden = false
+    }
+
+    private func preferredBackCamera() -> AVCaptureDevice? {
+        let discovery = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [
+                .builtInTripleCamera,
+                .builtInDualWideCamera,
+                .builtInDualCamera,
+                .builtInWideAngleCamera,
+            ],
+            mediaType: .video,
+            position: .back
+        )
+        return discovery.devices.first ?? AVCaptureDevice.default(for: .video)
+    }
+
     private func configureSession() {
-        guard let device = AVCaptureDevice.default(for: .video),
-              let input = try? AVCaptureDeviceInput(device: device),
-              session.canAddInput(input) else {
-            statusLabel.text = L10n.tr("pair_camera_missing")
+        guard !isConfigured else { return }
+        guard let device = preferredBackCamera(),
+              let input = try? AVCaptureDeviceInput(device: device) else {
+            showCameraStatus(L10n.tr("pair_camera_missing"), showSettings: false)
+            return
+        }
+
+        if (try? device.lockForConfiguration()) != nil {
+            if device.isFocusModeSupported(.continuousAutoFocus) {
+                device.focusMode = .continuousAutoFocus
+            }
+            if device.isAutoFocusRangeRestrictionSupported {
+                device.autoFocusRangeRestriction = .near
+            }
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+            device.unlockForConfiguration()
+        }
+
+        session.beginConfiguration()
+        if session.canSetSessionPreset(.hd1920x1080) {
+            session.sessionPreset = .hd1920x1080
+        }
+        guard session.canAddInput(input) else {
+            session.commitConfiguration()
+            showCameraStatus(L10n.tr("pair_camera_missing"), showSettings: false)
             return
         }
         session.addInput(input)
+
         let output = AVCaptureMetadataOutput()
-        guard session.canAddOutput(output) else { return }
+        guard session.canAddOutput(output) else {
+            session.commitConfiguration()
+            return
+        }
         session.addOutput(output)
         output.setMetadataObjectsDelegate(self, queue: .main)
-        output.metadataObjectTypes = [.qr]
+        if output.availableMetadataObjectTypes.contains(.qr) {
+            output.metadataObjectTypes = [.qr]
+        }
+        session.commitConfiguration()
+
+        captureDevice = device
+        isConfigured = true
 
         let preview = AVCaptureVideoPreviewLayer(session: session)
         preview.videoGravity = .resizeAspectFill
         preview.frame = view.bounds
         view.layer.insertSublayer(preview, at: 0)
         previewLayer = preview
-        statusLabel.isHidden = true
+        statusStack.isHidden = true
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        sessionQueue.async { [weak self] in
             self?.session.startRunning()
         }
     }
@@ -499,14 +617,21 @@ final class QrScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         didOutput metadataObjects: [AVMetadataObject],
         from connection: AVCaptureConnection
     ) {
-        guard !didEmit,
+        guard !didEmit, !didAccept,
               let obj = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
               let value = obj.stringValue else { return }
         didEmit = true
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        onCode?(value)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.didEmit = false
+        let accepted = onCode?(value) ?? false
+        if accepted {
+            didAccept = true
+            sessionQueue.async { [weak self] in
+                self?.session.stopRunning()
+            }
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.didEmit = false
+            }
         }
     }
 }

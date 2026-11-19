@@ -210,8 +210,9 @@ final class RelayProfile: Equatable, Hashable, Identifiable {
     }
 
     static func parse(_ raw: String) -> RelayProfile? {
-        guard raw.count <= 8192,
-              let data = raw.data(using: .utf8),
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count <= 8192,
+              let data = trimmed.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
@@ -233,8 +234,9 @@ final class RelayProfile: Equatable, Hashable, Identifiable {
         guard let device = obj["device"] as? String, isValidIdentifier(device) else { return nil }
         guard let token = obj["token"] as? String, isValidToken(token) else { return nil }
 
-        let rawName = (obj["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? device
-        guard !rawName.isEmpty, rawName.count <= 80, !CryptoHelpers.containsControlChar(rawName) else { return nil }
+        let trimmedName = (obj["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? device
+        let rawName = String(trimmedName.prefix(80))
+        guard !rawName.isEmpty, !CryptoHelpers.containsControlChar(rawName) else { return nil }
 
         let mode = (obj["mode"] as? String) ?? "relay"
         guard mode == "lan" || mode == "relay" else { return nil }
