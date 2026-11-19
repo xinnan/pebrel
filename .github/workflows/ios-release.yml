@@ -121,7 +121,7 @@ jobs:
     name: iOS IPA (${{ inputs.sign_mode || 'adhoc' }})
     needs: [relay]
     if: ${{ always() && (needs.relay.result == 'success' || needs.relay.result == 'skipped') }}
-    runs-on: macos-26
+    runs-on: macos-15
     timeout-minutes: 120
     env:
       PACKAGE_VERSION: ${{ inputs.version }}
@@ -131,6 +131,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.SOURCE_COMMIT }}
+      - name: Inspect Xcode toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphonesimulator --show-sdk-path
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"

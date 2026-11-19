@@ -24,7 +24,7 @@ Run the **`iOS Preview IPA package`** workflow ([`.github/workflows/ios-release.
 
 ### Option B: Local macOS build
 
-Prerequisites on macOS (Apple Silicon recommended, Xcode 16+):
+Prerequisites on macOS (Apple Silicon recommended, Xcode 16.x–26.3; Xcode 26.4+ SDK breaks pinned Zig 0.15.2 linking):
 
 ```bash
 brew install xcodegen cmake
