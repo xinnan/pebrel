@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 enum DesktopFailureKind: String, Equatable {
@@ -86,6 +87,16 @@ enum DesktopFailureClassifier {
             case .serverCertificateUntrusted, .secureConnectionFailed, .serverCertificateNotYetValid:
                 return relayReached ? .network : .tls
             case .userAuthenticationRequired: return .authentication
+            default: return .network
+            }
+        }
+        let ns = error as NSError
+        if ns.domain == NSPOSIXErrorDomain {
+            switch Int32(ns.code) {
+            case ETIMEDOUT: return .timeout
+            case ECONNREFUSED: return .refused
+            case EHOSTUNREACH, ENETUNREACH, EHOSTDOWN, ENETDOWN: return .network
+            case ECONNRESET, ENOTCONN, EPIPE: return relayReached ? .disconnected : .network
             default: return .network
             }
         }

@@ -295,6 +295,7 @@ struct RootView: View {
                         }
                     }
                 )
+                .id(sessionId)
             } else {
                 Color.clear.onAppear { route = .home }
             }
@@ -308,6 +309,7 @@ struct RootView: View {
                     onBack: { route = .terminal(sessionId: sessionId) },
                     onSwitcher: { showSwitcher = true }
                 )
+                .id("\(sessionId):\(kind)")
             } else {
                 Color.clear.onAppear { route = .home }
             }
@@ -328,6 +330,7 @@ struct RootView: View {
                         route = .sftpFile(sessionId: sessionId, tabId: tab.id)
                     }
                 )
+                .id(sessionId)
             } else {
                 Color.clear.onAppear { route = .home }
             }
@@ -355,6 +358,7 @@ struct RootView: View {
                         }
                     }
                 )
+                .id("\(sessionId):\(tabId)")
             } else {
                 Color.clear.onAppear { route = .sftp(sessionId: sessionId) }
             }
@@ -371,6 +375,7 @@ struct RootView: View {
                     route = .home
                 }
             )
+            .id(desktopId)
 
         case .pane(let desktopId, let windowId, let paneId, let processId):
             if let desktop = repository.desktops.first(where: { $0.id == desktopId }),
@@ -394,18 +399,19 @@ struct RootView: View {
                         route = .git(target: target)
                     },
                     onOpenConversation: {
-                        if let ag = pane.agent, let sid = ag.sessionId, !sid.isEmpty {
+                        if let ag = pane.agent {
                             route = .conversation(
                                 desktopId: desktopId,
                                 windowId: windowId,
                                 paneId: paneId,
                                 kind: ag.kind,
-                                session: sid,
+                                session: ag.sessionId ?? "",
                                 processId: desktop.runtimeProcess
                             )
                         }
                     }
                 )
+                .id("\(desktopId):\(windowId):\(paneId)")
             } else {
                 DesktopSessionChangedView(
                     reconnecting: repository.desktops.first(where: { $0.id == desktopId })?.status == "connecting",
@@ -426,6 +432,7 @@ struct RootView: View {
                     onSwitcher: { showSwitcher = true },
                     onOpenTab: { next in openDesktopTab(desktopId: desktopId, tab: next) }
                 )
+                .id("\(desktopId):\(windowId):\(tabId)")
             } else {
                 DesktopSessionChangedView(
                     reconnecting: repository.desktops.first(where: { $0.id == desktopId })?.status == "connecting",
@@ -446,22 +453,41 @@ struct RootView: View {
                     )
                 }
             )
+            .id("\(target.desktopId):\(target.windowId):\(target.paneId)")
 
         case .conversation(let desktopId, let windowId, let paneId, let kind, let session, let processId):
             if let desktop = repository.desktops.first(where: { $0.id == desktopId }),
                let pane = desktop.panes.first(where: { $0.id == paneId && $0.window == windowId }),
                processId == desktop.runtimeProcess {
-                DesktopConversationScreen(
-                    desktop: desktop,
-                    pane: pane,
-                    identity: ConversationIdentity(kind: kind, session: session, epoch: nil),
-                    repository: repository,
-                    onBack: {
-                        route = .pane(desktopId: desktopId, windowId: windowId, paneId: paneId, processId: processId)
-                    },
-                    onSwitcher: { showSwitcher = true },
-                    onOpenTab: { tab in openDesktopTab(desktopId: desktopId, tab: tab) }
-                )
+                let effectiveSession = session.isEmpty ? (pane.agent?.kind == kind ? (pane.agent?.sessionId ?? "") : "") : session
+                if (kind == "claude" || kind == "codex") && !effectiveSession.isEmpty {
+                    DesktopConversationScreen(
+                        desktop: desktop,
+                        pane: pane,
+                        identity: ConversationIdentity(kind: kind, session: effectiveSession, epoch: nil),
+                        repository: repository,
+                        onBack: {
+                            route = .pane(desktopId: desktopId, windowId: windowId, paneId: paneId, processId: processId)
+                        },
+                        onSwitcher: { showSwitcher = true },
+                        onOpenTab: { tab in openDesktopTab(desktopId: desktopId, tab: tab) }
+                    )
+                    .id("\(desktopId):\(windowId):\(paneId):\(kind):\(effectiveSession)")
+                } else {
+                    VStack(spacing: 0) {
+                        PebrelPageHeader(L10n.tr("chat_title"), onBack: {
+                            route = .pane(desktopId: desktopId, windowId: windowId, paneId: paneId, processId: processId)
+                        })
+                        VStack(spacing: 12) {
+                            Text(L10n.tr("chat_unavailable"))
+                                .font(.subheadline)
+                                .foregroundStyle(activePalette.muted)
+                                .multilineTextAlignment(.center)
+                        }
+                        .padding(24)
+                        Spacer()
+                    }
+                }
             } else {
                 DesktopSessionChangedView(
                     reconnecting: false,

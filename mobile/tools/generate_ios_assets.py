@@ -44,6 +44,8 @@ IOS_EXTRA_STRINGS = {
         "loading": "Loading…",
         "name": "Name",
         "ssh_session_name": "Session name (optional)",
+        "terminal_fit_width": "Fit to screen width",
+        "terminal_reset_zoom": "Reset zoom (100%)",
     },
     "zh-Hans": {
         "ios_local_shell_title": "iOS 不支持本地设备终端",
@@ -72,6 +74,8 @@ IOS_EXTRA_STRINGS = {
         "loading": "加载中…",
         "name": "名称",
         "ssh_session_name": "会话名称（可选）",
+        "terminal_fit_width": "适配屏幕宽度",
+        "terminal_reset_zoom": "重置缩放（100%）",
     },
 }
 

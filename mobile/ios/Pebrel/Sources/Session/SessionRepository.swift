@@ -746,7 +746,7 @@ final class SessionRepository: ObservableObject {
     func startWatchingDesktopPane(desktopId: String, windowId: Int64, paneId: Int64) {
         let target = "\(desktopId):\(windowId):\(paneId)"
         if desktopOutput.target == target && screenWatchTask != nil { return }
-        stopWatchingDesktopPane()
+        stopWatchingDesktopPane(target: nil)
         screenSync.reset()
         screenHistoryStart = nil
         desktopOutput = DesktopOutputState(target: target, frame: nil, text: "", loading: true, error: nil)
@@ -756,7 +756,8 @@ final class SessionRepository: ObservableObject {
         }
     }
 
-    func stopWatchingDesktopPane() {
+    func stopWatchingDesktopPane(target: String? = nil) {
+        if let target, desktopOutput.target != target { return }
         screenWatchTask?.cancel()
         screenWatchTask = nil
         screenWakeContinuation?.resume()
@@ -806,6 +807,7 @@ final class SessionRepository: ObservableObject {
 
             do {
                 let res = try await client.request(method: "pane.read", params: params)
+                guard !Task.isCancelled, desktopOutput.target == target else { return }
                 let prevFrame = desktopOutput.frame
                 let prevText = desktopOutput.text
 
@@ -828,6 +830,7 @@ final class SessionRepository: ObservableObject {
                 let changed = (nextFrame != prevFrame) || (nextText != prevText)
                 intervalMs = changed ? 33 : min(intervalMs * 2, 500)
             } catch let rpc as DesktopRpcFailure {
+                guard !Task.isCancelled, desktopOutput.target == target else { return }
                 if rpc.code == "invalid_params" && !client.capabilities.terminalHistory && !client.capabilities.terminalScroll {
                     screenUnsupported = true
                     intervalMs = 33
@@ -837,6 +840,7 @@ final class SessionRepository: ObservableObject {
                 desktopOutput.error = rpc.code
                 intervalMs = 500
             } catch {
+                guard !Task.isCancelled, desktopOutput.target == target else { return }
                 desktopOutput.loading = false
                 intervalMs = 500
             }

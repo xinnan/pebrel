@@ -36,7 +36,7 @@ struct TerminalPreferences: Equatable {
         if !copy.desktopZoom.isFinite {
             copy.desktopZoom = 1.0
         } else {
-            copy.desktopZoom = copy.desktopZoom.clamped(to: 0.5...2.5)
+            copy.desktopZoom = copy.desktopZoom.clamped(to: 0.2...5.0)
         }
         if copy.cursorStyle != TerminalPreferenceValues.barCursor &&
            copy.cursorStyle != TerminalPreferenceValues.underlineCursor {

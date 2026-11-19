@@ -363,16 +363,20 @@ struct DesktopTerminalScreen: View {
     @State private var directMode = true
     @State private var focusedMode = false
     @State private var focusTrigger = 0
-    @State private var viewportCols = 80
+    @State private var fitWidthTrigger = 0
     @State private var showDetails = false
     @State private var zoomBannerText: String?
 
-    private var displayedFrame: TerminalFrame? {
-        guard let raw = repository.desktopOutput.frame else { return nil }
-        if repository.display.preferences.desktopWrapLines && viewportCols < raw.columns {
-            return TerminalReflow.reflow(raw, columns: viewportCols)
-        }
-        return raw
+    private var paneIdentity: String {
+        "\(desktop.id):\(pane.window):\(pane.id)"
+    }
+
+    private var currentFrame: TerminalFrame? {
+        repository.desktopOutput.target == paneIdentity ? repository.desktopOutput.frame : nil
+    }
+
+    private var currentText: String {
+        repository.desktopOutput.target == paneIdentity ? repository.desktopOutput.text : ""
     }
 
     var body: some View {
@@ -394,20 +398,21 @@ struct DesktopTerminalScreen: View {
             }
 
             ZStack {
-                if let frame = displayedFrame {
+                if let frame = currentFrame {
                     TerminalCanvasView(
                         frame: frame,
                         fontFamily: repository.display.preferences.fontFamily,
-                        fontSize: CGFloat(Double(repository.display.preferences.fontSize) * repository.display.preferences.desktopZoom),
+                        fontSize: CGFloat(repository.display.preferences.fontSize),
+                        snapshotZoom: CGFloat(repository.display.preferences.desktopZoom),
+                        wrapLines: repository.display.preferences.desktopWrapLines,
                         cursorStyle: TerminalPreferenceValues.blockCursor,
                         cursorBlink: false,
                         pinchZoomEnabled: repository.display.preferences.pinchZoom,
                         directInputEnabled: directMode && desktop.allowInput && desktop.status == "ready",
                         focusTrigger: focusTrigger,
+                        fitWidthTrigger: fitWidthTrigger,
                         isSnapshotMirror: true,
-                        onGridSizeChanged: { cols, _, _, _ in
-                            viewportCols = cols
-                        },
+                        onGridSizeChanged: nil,
                         onTextInput: { text in
                             guard let input = repository.desktopTerminalInput(for: desktop.id, windowId: pane.window, paneId: pane.id) else { return }
                             Task { _ = await input.sendText(text) }
@@ -424,24 +429,23 @@ struct DesktopTerminalScreen: View {
                                 Task { await input.scroll(lines: lines, column: col, row: row) }
                             }
                         },
-                        onScrollOffset: { offset in
-                            if let hist = frame.history {
-                                let start = hist.oldest + Int64(offset)
-                                repository.requestDesktopHistoryPage(start: start >= hist.liveStart ? nil : start)
-                            }
+                        onScrollOffset: nil,
+                        onHistoryPage: { start in
+                            repository.requestDesktopHistoryPage(start: start)
                         },
-                        onFontSizeChanged: { newSize in
-                            let base = max(8.0, Double(repository.display.preferences.fontSize))
-                            repository.display.update { $0.desktopZoom = Double(newSize) / base }
+                        onFontSizeChanged: nil,
+                        onSnapshotZoomChanged: { scale in
+                            repository.display.update { $0.desktopZoom = Double(scale) }
                         },
                         onZoomGestureActive: { active, size in
                             zoomBannerText = active ? "\(Int(size.rounded())) pt" : nil
                         },
                         onCopyText: nil
                     )
-                } else if !repository.desktopOutput.text.isEmpty {
-                    ScrollView {
-                        Text(repository.desktopOutput.text)
+                    .id(paneIdentity)
+                } else if !currentText.isEmpty {
+                    ScrollView([.vertical, .horizontal]) {
+                        Text(currentText)
                             .font(TerminalFontRegistry.swiftUIFont(family: repository.display.preferences.fontFamily, size: CGFloat(repository.display.preferences.fontSize)))
                             .foregroundStyle(palette.foreground)
                             .textSelection(.enabled)
@@ -466,7 +470,7 @@ struct DesktopTerminalScreen: View {
 
             CommandComposerView(
                 repository: repository,
-                draftKey: "\(desktop.id):\(pane.window):\(pane.id)",
+                draftKey: paneIdentity,
                 isConversation: false,
                 enabled: desktop.allowInput && desktop.status == "ready",
                 extraShortcuts: [],
@@ -484,12 +488,14 @@ struct DesktopTerminalScreen: View {
                 onAttachFile: nil
             )
         }
-        .onAppear {
+        .task(id: "\(paneIdentity):\(desktop.status):\(desktop.connectionGeneration)") {
             directMode = repository.display.preferences.directInput
-            repository.startWatchingDesktopPane(desktopId: desktop.id, windowId: pane.window, paneId: pane.id)
+            if desktop.status == "ready" {
+                repository.startWatchingDesktopPane(desktopId: desktop.id, windowId: pane.window, paneId: pane.id)
+            }
         }
         .onDisappear {
-            repository.stopWatchingDesktopPane()
+            repository.stopWatchingDesktopPane(target: paneIdentity)
         }
         .alert(pane.displayTitle, isPresented: $showDetails) {
             Button(L10n.tr("close"), role: .cancel) {}
@@ -533,7 +539,7 @@ struct DesktopTerminalScreen: View {
                 .disabled(desktop.status != "ready")
             }
 
-            if pane.agent?.sessionId != nil {
+            if let kind = pane.agent?.kind, (kind == "claude" || kind == "codex") {
                 Button(action: onOpenConversation) {
                     Image(systemName: "bubble.left.and.bubble.right")
                         .foregroundStyle(palette.primary)
@@ -546,6 +552,15 @@ struct DesktopTerminalScreen: View {
                     get: { repository.display.preferences.desktopWrapLines },
                     set: { val in repository.display.update { $0.desktopWrapLines = val } }
                 ))
+                Button(L10n.tr("terminal_fit_width")) {
+                    if repository.display.preferences.desktopWrapLines {
+                        repository.display.update { $0.desktopWrapLines = false }
+                    }
+                    fitWidthTrigger += 1
+                }
+                Button(L10n.tr("terminal_reset_zoom")) {
+                    repository.display.update { $0.desktopZoom = 1.0 }
+                }
                 Button(L10n.tr("terminal_details")) { showDetails = true }
             } label: {
                 Image(systemName: "ellipsis")

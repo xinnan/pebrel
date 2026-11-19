@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import Pebrel
 
@@ -259,6 +260,21 @@ final class PebrelCoreTests: XCTestCase {
         XCTAssertEqual(receivedSnapshot?.processId, 42)
         XCTAssertEqual(client.hostOs, "linux")
         client.close()
+    }
+
+    func testDesktopZoomRangeAndPosixFailureClassification() {
+        var prefs = TerminalPreferences()
+        prefs.desktopZoom = 0.25
+        XCTAssertEqual(prefs.normalized().desktopZoom, 0.25, accuracy: 0.001)
+        prefs.desktopZoom = 0.05
+        XCTAssertEqual(prefs.normalized().desktopZoom, 0.2, accuracy: 0.001)
+        prefs.desktopZoom = 9.0
+        XCTAssertEqual(prefs.normalized().desktopZoom, 5.0, accuracy: 0.001)
+
+        let timedOut = NSError(domain: NSPOSIXErrorDomain, code: Int(ETIMEDOUT))
+        XCTAssertEqual(DesktopFailureClassifier.classify(timedOut), .timeout)
+        let refused = NSError(domain: NSPOSIXErrorDomain, code: Int(ECONNREFUSED))
+        XCTAssertEqual(DesktopFailureClassifier.classify(refused), .refused)
     }
 }
 
