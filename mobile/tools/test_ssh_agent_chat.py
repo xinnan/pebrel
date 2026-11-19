@@ -201,5 +201,31 @@ class RelayTest(unittest.TestCase):
         self.assertIsNone(result["agent"])
 
 
+class AntigravityProjectionTest(unittest.TestCase):
+    def test_generic_tool_results_and_ephemeral_steps_pair_cleanly(self):
+        out = chat.Projection()
+        records = [
+            {"type": "USER_INPUT", "source": "USER_EXPLICIT", "status": "DONE",
+             "content": "preamble\n<USER_REQUEST>\ncheck build\n</USER_REQUEST>"},
+            {"type": "PLANNER_RESPONSE", "source": "MODEL", "status": "DONE", "content": "",
+             "tool_calls": [{"name": "read_file", "args": {"Path": "/tmp/a"}},
+                            {"name": "run_command", "args": {"CommandLine": "cargo test"}}]},
+            {"type": "EPHEMERAL_MESSAGE", "source": "SYSTEM_SDK", "status": "DONE", "content": "ignored"},
+            {"type": "GENERIC", "source": "MODEL", "status": "DONE", "content": "file body"},
+            {"type": "GENERIC", "source": "MODEL", "status": "RUNNING", "content": "bg output"},
+            {"type": "PLANNER_RESPONSE", "source": "MODEL", "status": "DONE", "content": "all done",
+             "tool_calls": [{"name": "run_command", "args": {"CommandLine": "fail"}}]},
+            {"type": "GENERIC", "source": "MODEL", "status": "ERROR", "content": "", "error": "boom"},
+        ]
+        for idx, rec in enumerate(records):
+            chat.project_antigravity(rec, str(idx), out)
+        self.assertEqual(["user", "tool", "tool", "assistant", "tool"], [m["role"] for m in out.messages])
+        self.assertEqual("check build", out.messages[0]["text"])
+        self.assertEqual(("file body", True, False), (out.messages[1]["detail"], out.messages[1]["complete"], out.messages[1]["error"]))
+        self.assertEqual(("bg output", True, False), (out.messages[2]["detail"], out.messages[2]["complete"], out.messages[2]["error"]))
+        self.assertEqual("all done", out.messages[3]["text"])
+        self.assertEqual(("boom", True, True), (out.messages[4]["detail"], out.messages[4]["complete"], out.messages[4]["error"]))
+
+
 if __name__ == "__main__":
     unittest.main()

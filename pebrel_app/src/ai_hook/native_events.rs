@@ -442,13 +442,7 @@ fn antigravity_payload_marks_subagent(payload: &Value, conversation_id: Option<&
     }
 }
 
-fn valid_antigravity_conversation_segment(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
-        && id != "."
-        && id != ".."
-        && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
-}
+use crate::session::valid_antigravity_conversation_segment;
 
 fn clean_absolute_path(raw: &str) -> Option<&Path> {
     if raw.len() > 4096 || raw.chars().any(char::is_control) {

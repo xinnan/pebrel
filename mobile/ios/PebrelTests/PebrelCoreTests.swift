@@ -276,6 +276,44 @@ final class PebrelCoreTests: XCTestCase {
         let refused = NSError(domain: NSPOSIXErrorDomain, code: Int(ECONNREFUSED))
         XCTAssertEqual(DesktopFailureClassifier.classify(refused), .refused)
     }
+
+    func testDesktopConversationSupportsAntigravityAgent() {
+        XCTAssertTrue(DesktopConversation.supportedKinds.contains("claude"))
+        XCTAssertTrue(DesktopConversation.supportedKinds.contains("codex"))
+        XCTAssertTrue(DesktopConversation.supportedKinds.contains("antigravity"))
+        XCTAssertFalse(DesktopConversation.supportedKinds.contains("aider"))
+
+        let snapshot = DesktopSnapshot.parse([
+            "process_id": 7,
+            "revision": 3,
+            "windows": [[
+                "id": 1,
+                "tabs": [[
+                    "index": 0,
+                    "label": "agy",
+                    "kind": "shell",
+                    "active": true,
+                    "panes": [[
+                        "id": 9,
+                        "title": "agy",
+                        "cwd": "/work",
+                        "running_program": "antigravity",
+                        "task_state": "finished",
+                        "state_change_seq": 5,
+                        "agent": [
+                            "kind": "antigravity",
+                            "display_name": "Antigravity",
+                            "session_id": "021267b4-1ed5-4421-be03-c4d2054f5cae",
+                        ],
+                    ]],
+                ]],
+            ]],
+        ])
+        let pane = snapshot.panes.first
+        XCTAssertEqual(pane?.agent?.kind, "antigravity")
+        XCTAssertEqual(pane?.agent?.displayName, "Antigravity")
+        XCTAssertEqual(pane?.agent?.sessionId, "021267b4-1ed5-4421-be03-c4d2054f5cae")
+    }
 }
 
 private final class EarlyApprovalTransport: DesktopTransport {

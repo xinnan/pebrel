@@ -539,7 +539,7 @@ struct DesktopTerminalScreen: View {
                 .disabled(desktop.status != "ready")
             }
 
-            if let kind = pane.agent?.kind, (kind == "claude" || kind == "codex") {
+            if let kind = pane.agent?.kind, DesktopConversation.supportedKinds.contains(kind) {
                 Button(action: onOpenConversation) {
                     Image(systemName: "bubble.left.and.bubble.right")
                         .foregroundStyle(palette.primary)

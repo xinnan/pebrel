@@ -23,7 +23,12 @@ const MESSAGE_BYTES: usize = 48 * 1024;
 const OUTPUT_BYTES: usize = 128 * 1024;
 const MESSAGE_COUNT: usize = 160;
 
+mod antigravity;
 mod remote;
+
+pub(crate) fn antigravity_local_transcript_path(session_id: &str) -> Option<String> {
+    antigravity::local_transcript_path(session_id)
+}
 
 pub(crate) enum Location {
     Local(PaneExecContext),
@@ -48,6 +53,8 @@ pub(crate) struct Message {
     pub detail: Option<String>,
     pub complete: bool,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub error: bool,
     #[serde(skip)]
     paired: bool,
     #[serde(skip)]
@@ -72,7 +79,7 @@ pub(crate) fn read(
         Location::Local(context) if context.wsl_distribution().is_some() => {
             capture_wsl(&source, context, before)?
         },
-        Location::Local(_) => capture_file(Path::new(&source.path), before)?,
+        Location::Local(_) => capture_local_file(&source.identity, Path::new(&source.path), before)?,
     };
     validate_source(&source.identity, &source.path, &capture.head)?;
     let mut hash = Sha256::new();
@@ -95,8 +102,30 @@ fn io_failure(_: impl std::fmt::Display) -> ApiError {
     ApiError::new("conversation_unavailable", "the native conversation file is not readable")
 }
 
+fn capture_local_file(
+    identity: &Identity,
+    path: &Path,
+    before: Option<u64>,
+) -> Result<Capture, ApiError> {
+    match File::open(path) {
+        Ok(file) => capture_open_file(file, before),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && identity.kind == "antigravity" => {
+            let Some(fallback) = antigravity::fallback_transcript_path(path) else {
+                return Err(io_failure(error));
+            };
+            let file = File::open(&fallback).map_err(io_failure)?;
+            capture_open_file(file, before)
+        },
+        Err(error) => Err(io_failure(error)),
+    }
+}
+
 fn capture_file(path: &Path, before: Option<u64>) -> Result<Capture, ApiError> {
-    let mut file = File::open(path).map_err(io_failure)?;
+    let file = File::open(path).map_err(io_failure)?;
+    capture_open_file(file, before)
+}
+
+fn capture_open_file(mut file: File, before: Option<u64>) -> Result<Capture, ApiError> {
     let meta = file.metadata().map_err(io_failure)?;
     if !meta.is_file() {
         return Err(io_failure("not a file"));
@@ -195,6 +224,7 @@ fn validate_source(identity: &Identity, path: &str, head: &[u8]) -> Result<(), A
             path.rsplit(['/', '\\']).next().and_then(|name| name.strip_suffix(".jsonl"))
                 == Some(identity.session_id.as_str())
         },
+        "antigravity" => antigravity::validate_source(identity, path, head),
         _ => false,
     };
     if valid {
@@ -226,6 +256,7 @@ fn project(
     let cursor = (offset > 0).then_some(offset);
     let mut messages = Vec::new();
     let mut calls = HashMap::new();
+    let mut agy_state = antigravity::AntigravityState::default();
     let mut truncated = false;
     for line in bytes.split_inclusive(|b| *b == b'\n') {
         let id = offset.to_string();
@@ -238,10 +269,10 @@ fn project(
             truncated = true;
             continue;
         };
-        if identity.kind == "codex" {
-            codex(&record, &id, &mut messages, &mut calls);
-        } else {
-            claude(&record, identity, &id, &mut messages, &mut calls)?;
+        match identity.kind.as_str() {
+            "codex" => codex(&record, &id, &mut messages, &mut calls),
+            "antigravity" => antigravity::project_record(&record, &id, &mut messages, &mut agy_state),
+            _ => claude(&record, identity, &id, &mut messages, &mut calls)?,
         }
     }
     let mut kept = 0;
@@ -331,6 +362,7 @@ fn push_message(
         detail: None,
         complete: true,
         truncated: false,
+        error: false,
         paired: false,
         event,
     });
@@ -353,6 +385,7 @@ fn tool(
         detail: None,
         complete: false,
         truncated: false,
+        error: false,
         paired: false,
         event: false,
     });
@@ -364,10 +397,12 @@ fn result(
     id: String,
     call: &str,
     output: String,
+    is_error: bool,
 ) {
     if let Some(message) = calls.get(call).and_then(|index| messages.get_mut(*index)) {
         message.detail = Some(output);
         message.complete = true;
+        message.error = is_error;
     } else {
         messages.push(Message {
             id,
@@ -377,6 +412,7 @@ fn result(
             detail: Some(output),
             complete: true,
             truncated: false,
+            error: is_error,
             paired: false,
             event: false,
         });
@@ -438,6 +474,7 @@ fn codex(
                 id.into(),
                 p["call_id"].as_str().unwrap_or_default(),
                 text_content(&p["output"]),
+                false,
             );
         },
         _ => {},
@@ -494,6 +531,7 @@ fn claude(
                     block_id,
                     part["tool_use_id"].as_str().unwrap_or_default(),
                     text_content(&part["content"]),
+                    part["is_error"].as_bool().unwrap_or(false),
                 ),
                 _ => {},
             }

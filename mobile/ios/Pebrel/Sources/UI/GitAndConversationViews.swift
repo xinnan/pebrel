@@ -422,12 +422,21 @@ private struct ConversationShellView<Source: ConversationSource & ObservableObje
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
                             if page.before != nil {
-                                Button(L10n.tr("sftp_more")) {
+                                Button(L10n.tr("chat_older")) {
                                     Task { _ = try? await source.refresh(older: true) }
                                 }
                                 .font(.caption.weight(.medium))
                                 .foregroundStyle(palette.primary)
                                 .frame(maxWidth: .infinity)
+                            }
+
+                            if page.loaded && page.messages.isEmpty {
+                                Text(L10n.tr("chat_empty"))
+                                    .font(.subheadline)
+                                    .foregroundStyle(palette.muted)
+                                    .multilineTextAlignment(.center)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 32)
                             }
 
                             ForEach(page.messages) { msg in
@@ -438,7 +447,7 @@ private struct ConversationShellView<Source: ConversationSource & ObservableObje
                         }
                         .padding(14)
                     }
-                    .onChange(of: page.messages.count) { _ in
+                    .onChange(of: page.messages.last?.id) { _ in
                         withAnimation(.easeOut(duration: 0.2)) {
                             proxy.scrollTo("chat-bottom", anchor: .bottom)
                         }
@@ -477,7 +486,18 @@ private struct ConversationShellView<Source: ConversationSource & ObservableObje
                             return false
                         }
                     },
-                    onSendShortcut: { _ in },
+                    onSendShortcut: { shortcut in
+                        let supportedKeys: Set<String> = ["Ctrl+C", "Esc", "Tab", "←", "→", "↑", "↓"]
+                        guard supportedKeys.contains(shortcut.label) else { return }
+                        Task {
+                            do {
+                                try await source.key(shortcut.label)
+                                errorNotice = nil
+                            } catch {
+                                errorNotice = error.localizedDescription
+                            }
+                        }
+                    },
                     onToggleKeyboard: {},
                     onAttachFile: nil
                 )
@@ -646,11 +666,14 @@ private struct ConversationShellView<Source: ConversationSource & ObservableObje
     }
 
     private func promptCard(_ prompt: ConversationPrompt) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let displayOptions = (prompt.binary && prompt.options.isEmpty)
+            ? [L10n.tr("chat_allow"), L10n.tr("chat_deny")]
+            : prompt.options
+        return VStack(alignment: .leading, spacing: 10) {
             Text(prompt.text)
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(palette.foreground)
-            ForEach(Array(prompt.options.enumerated()), id: \.offset) { idx, option in
+            ForEach(Array(displayOptions.enumerated()), id: \.offset) { idx, option in
                 Button {
                     guard Date().timeIntervalSince(lastPromptShownAt) >= 0.35 else { return }
                     Task {
@@ -659,7 +682,7 @@ private struct ConversationShellView<Source: ConversationSource & ObservableObje
                     }
                 } label: {
                     HStack {
-                        Text("\(idx + 1). \(option)")
+                        Text(prompt.binary ? option : "\(idx + 1). \(option)")
                             .font(.subheadline)
                             .foregroundStyle(idx == prompt.selected ? palette.onPrimary : palette.foreground)
                         Spacer()
@@ -678,9 +701,10 @@ private struct ConversationShellView<Source: ConversationSource & ObservableObje
     }
 
     private var statusLine: some View {
-        HStack(spacing: 8) {
+        let isWaiting = page.state == "waiting_input" || page.state == "attention"
+        return HStack(spacing: 8) {
             Circle()
-                .fill(page.state == "running" ? palette.primary : (page.state == "waiting_input" ? palette.yellow : palette.tertiary))
+                .fill(page.state == "running" ? palette.primary : (isWaiting ? palette.yellow : palette.tertiary))
                 .frame(width: 8, height: 8)
             Text(page.state == "running" ? "\(title) · \(elapsedSeconds)s" : (page.activity.isEmpty ? page.state : page.activity))
                 .font(.caption)

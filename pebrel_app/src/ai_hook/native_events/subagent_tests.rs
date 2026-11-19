@@ -153,11 +153,9 @@ fn antigravity_in_process_subagents_never_hijack_primary_conversation_or_turn() 
         let mut activity = AgentActivity::default();
         let mut active_session = None;
 
-        assert!(route_antigravity_hook(
-            &mut activity,
-            &mut active_session,
-            send("session-start", root_id, &root_transcript, json!({})),
-        ));
+        let start = send("session-start", root_id, &root_transcript, json!({})).unwrap();
+        assert_eq!(start.session_file.as_deref(), root_transcript.to_str());
+        assert!(route_antigravity_hook(&mut activity, &mut active_session, Some(start)));
         assert_eq!(activity.status(), AgentStatus::Idle);
         assert!(route_antigravity_hook(
             &mut activity,
@@ -328,9 +326,10 @@ fn antigravity_explicit_subagent_markers_and_untrusted_paths_are_handled_safely(
     let traversal_body = json!({
         "conversationId": "11111111-1111-4111-8111-111111111111",
         "transcriptPath": "/tmp/brain/../outside/transcript.jsonl",
+        "session_file": "/etc/secret.jsonl",
     });
     let (local, remote) = parse_both(traversal_body);
-    assert!(local.is_none() && remote.is_some());
+    assert!(local.is_none() && remote.as_ref().is_some_and(|event| event.session_file.is_none()));
 
     let (_temp, trusted_brain) = temp_brain_root();
     let sub_id = "22222222-2222-4222-8222-222222222222";

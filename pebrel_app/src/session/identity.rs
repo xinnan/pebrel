@@ -24,6 +24,71 @@ pub(crate) fn codex_rollout_id(path: &str) -> Option<&str> {
         .then_some(id)
 }
 
+/// Antigravity conversation directory segments stay strictly single-segment
+/// ASCII identifiers without path traversal characters.
+pub(crate) fn valid_antigravity_conversation_segment(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id != "."
+        && id != ".."
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// Validate an Antigravity transcript path without consulting the host
+/// filesystem: Windows, WSL and SSH paths must match the exact lexical
+/// `.../brain/<session_id>/.system_generated/logs/transcript[_full].jsonl`
+/// layout with no `.` or `..` traversal components.
+pub(crate) fn valid_antigravity_transcript_path(path: &str, session_id: &str) -> bool {
+    if !super::valid_native_session_file(path)
+        || !valid_antigravity_conversation_segment(session_id)
+    {
+        return false;
+    }
+    if path.split(['/', '\\']).any(|segment| matches!(segment, "." | "..")) {
+        return false;
+    }
+    let segments: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+    let Some(tail) = segments.len().checked_sub(5).and_then(|start| segments.get(start..)) else {
+        return false;
+    };
+    tail[0] == "brain"
+        && tail[1] == session_id
+        && tail[2] == ".system_generated"
+        && tail[3] == "logs"
+        && matches!(tail[4], "transcript.jsonl" | "transcript_full.jsonl")
+}
+
+/// Derive a native transcript path from an Antigravity `artifactDirectoryPath`
+/// (`.../brain/<session_id>`) without consulting the host filesystem.
+pub(crate) fn antigravity_transcript_from_artifact_dir(
+    dir: &str,
+    session_id: &str,
+) -> Option<String> {
+    if dir.len() > 4000
+        || dir.chars().any(char::is_control)
+        || !valid_antigravity_conversation_segment(session_id)
+    {
+        return None;
+    }
+    let absolute = dir.starts_with('/')
+        || dir.starts_with(r"\\")
+        || (dir.as_bytes().get(1) == Some(&b':')
+            && dir.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+            && matches!(dir.as_bytes().get(2), Some(b'/' | b'\\')));
+    if !absolute || dir.split(['/', '\\']).any(|segment| matches!(segment, "." | "..")) {
+        return None;
+    }
+    let segments: Vec<&str> = dir.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+    let tail = segments.len().checked_sub(2).and_then(|start| segments.get(start..))?;
+    if tail[0] != "brain" || tail[1] != session_id {
+        return None;
+    }
+    let sep = if dir.contains('\\') && !dir.contains('/') { '\\' } else { '/' };
+    let trimmed = dir.trim_end_matches(['/', '\\']);
+    let candidate = format!("{trimmed}{sep}.system_generated{sep}logs{sep}transcript_full.jsonl");
+    valid_antigravity_transcript_path(&candidate, session_id).then_some(candidate)
+}
+
 impl super::AgentSession {
     /// Upgrade snapshots carrying a native file before comparing hook
     /// acknowledgements or generating a command. Unrecognized file names keep
@@ -126,5 +191,71 @@ mod tests {
             assert_eq!(saved.session_id.as_deref(), Some(THREAD));
             assert_eq!(saved.resume_command(), Some(format!("codex resume {THREAD}")));
         }
+    }
+
+    #[test]
+    fn antigravity_transcript_paths_bind_session_and_reject_traversal() {
+        for valid in [
+            format!(
+                "/home/user/.gemini/antigravity-cli/brain/{THREAD}/.system_generated/logs/transcript.jsonl"
+            ),
+            format!(
+                "/home/user/.gemini/antigravity-cli/brain/{THREAD}/.system_generated/logs/transcript_full.jsonl"
+            ),
+            format!(
+                r"C:\Users\user\.gemini\antigravity-cli\brain\{THREAD}\.system_generated\logs\transcript_full.jsonl"
+            ),
+            format!(
+                r"\\wsl$\Ubuntu\home\user\.gemini\antigravity-cli\brain\{THREAD}\.system_generated\logs\transcript.jsonl"
+            ),
+        ] {
+            assert!(valid_antigravity_transcript_path(&valid, THREAD), "{valid}");
+        }
+        for invalid in [
+            format!(
+                "/home/user/.gemini/antigravity-cli/brain/other-session/.system_generated/logs/transcript.jsonl"
+            ),
+            format!(
+                "/home/user/.gemini/antigravity-cli/brain/../brain/{THREAD}/.system_generated/logs/transcript.jsonl"
+            ),
+            format!(
+                "/home/user/.gemini/antigravity-cli/other/{THREAD}/.system_generated/logs/transcript.jsonl"
+            ),
+            format!(
+                "/home/user/.gemini/antigravity-cli/brain/{THREAD}/.system_generated/logs/other.jsonl"
+            ),
+            format!("brain/{THREAD}/.system_generated/logs/transcript.jsonl"),
+        ] {
+            assert!(!valid_antigravity_transcript_path(&invalid, THREAD), "{invalid}");
+        }
+        assert_eq!(
+            antigravity_transcript_from_artifact_dir(
+                &format!("/home/user/.gemini/antigravity-cli/brain/{THREAD}"),
+                THREAD,
+            )
+            .as_deref(),
+            Some(
+                format!(
+                    "/home/user/.gemini/antigravity-cli/brain/{THREAD}/.system_generated/logs/transcript_full.jsonl"
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(
+            antigravity_transcript_from_artifact_dir(
+                &format!(r"C:\Users\u\.gemini\antigravity-cli\brain\{THREAD}"),
+                THREAD,
+            )
+            .as_deref(),
+            Some(
+                format!(
+                    r"C:\Users\u\.gemini\antigravity-cli\brain\{THREAD}\.system_generated\logs\transcript_full.jsonl"
+                )
+                .as_str()
+            )
+        );
+        assert!(
+            antigravity_transcript_from_artifact_dir("/tmp/brain/../outside", THREAD).is_none()
+        );
     }
 }

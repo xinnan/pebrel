@@ -92,11 +92,26 @@ fn parse_envelope_with_transport(bytes: &[u8], local_transport: bool) -> Option<
     let native_transcript = matches!(source.as_str(), "claude" | "codex")
         .then(|| payload.get("transcript_path"))
         .flatten();
-    let session_file = native_transcript
-        .or_else(|| payload.get("session_file"))
-        .and_then(Value::as_str)
-        .filter(|path| crate::session::valid_native_session_file(path))
-        .map(str::to_owned);
+    let session_file = if source == "antigravity" {
+        reported_session_id.as_deref().and_then(|id| {
+            payload
+                .get("transcriptPath")
+                .and_then(Value::as_str)
+                .filter(|path| crate::session::valid_antigravity_transcript_path(path, id))
+                .map(str::to_owned)
+                .or_else(|| {
+                    payload.get("artifactDirectoryPath").and_then(Value::as_str).and_then(|dir| {
+                        crate::session::antigravity_transcript_from_artifact_dir(dir, id)
+                    })
+                })
+        })
+    } else {
+        native_transcript
+            .or_else(|| payload.get("session_file"))
+            .and_then(Value::as_str)
+            .filter(|path| crate::session::valid_native_session_file(path))
+            .map(str::to_owned)
+    };
     // Native hooks can name the running session/group rather than the thread
     // accepted by `codex resume`. The transcript belongs to the actual thread,
     // including when a conversation was forked or loaded into another session.

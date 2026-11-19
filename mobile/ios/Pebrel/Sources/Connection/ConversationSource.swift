@@ -254,6 +254,9 @@ final class SshAgentChatClient {
 /// Desktop Runtime conversation client (`conversation.read/send/choose/key`).
 @MainActor
 final class DesktopConversation: ObservableObject, ConversationSource {
+    /// Agent kinds whose live transcripts the Desktop Runtime `conversation.*` API projects.
+    nonisolated static let supportedKinds: Set<String> = ["claude", "codex", "antigravity"]
+
     @Published private(set) var page: ConversationPage
     var pagePublisher: AnyPublisher<ConversationPage, Never> { $page.eraseToAnyPublisher() }
 

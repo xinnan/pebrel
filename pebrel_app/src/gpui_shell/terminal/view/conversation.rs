@@ -78,6 +78,20 @@ impl TerminalView {
         let path = target
             .session_file
             .filter(|path| crate::session::valid_native_session_file(path))
+            .or_else(|| {
+                (identity.kind == "antigravity"
+                    && self.ssh_destination.is_none()
+                    && self
+                        .exec_context
+                        .as_ref()
+                        .is_some_and(|context| context.wsl_distribution().is_none()))
+                .then(|| {
+                    crate::assistant_answer::conversation::antigravity_local_transcript_path(
+                        &identity.session_id,
+                    )
+                })
+                .flatten()
+            })
             .ok_or_else(|| {
                 ApiError::new(
                     "conversation_unavailable",

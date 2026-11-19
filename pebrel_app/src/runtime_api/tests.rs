@@ -65,6 +65,24 @@ fn conversation_mutations_require_current_identity_and_read_cannot_smuggle_input
         ))
         .is_err()
     );
+    let agy_read = ApiRequest::new(
+        "token".into(),
+        "conversation.read",
+        json!({"window_id":1,"pane_id":2,"identity":{"kind":"antigravity","session_id":"conv-1"}}),
+    );
+    assert!(RuntimeCommand::from_request(&agy_read).is_ok());
+    let agy_send = ApiRequest::new(
+        "token".into(),
+        "conversation.send",
+        json!({"window_id":1,"pane_id":2,"identity":{"kind":"antigravity","session_id":"conv-1","epoch":1},"text":"hello"}),
+    );
+    assert!(RuntimeCommand::from_request(&agy_send).is_ok());
+    let unknown_kind = ApiRequest::new(
+        "token".into(),
+        "conversation.read",
+        json!({"window_id":1,"pane_id":2,"identity":{"kind":"aider","session_id":"conv-1"}}),
+    );
+    assert!(RuntimeCommand::from_request(&unknown_kind).is_err());
 }
 
 #[test]

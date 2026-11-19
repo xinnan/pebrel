@@ -420,6 +420,13 @@ class Projection:
         self.messages = []
         self.calls = {}
         self.pending = []
+        self.running = []
+
+    def complete_running(self):
+        for index in self.running:
+            if index < len(self.messages):
+                self.messages[index]["complete"] = True
+        self.running.clear()
 
     def say(self, identity, role, text, event=False):
         if not isinstance(text, str) or not text.strip():
@@ -441,7 +448,7 @@ class Projection:
                               "complete": False, "truncated": False, "error": False,
                               "_event": False, "_paired": False})
 
-    def result(self, identity, call, output, error=False):
+    def result(self, identity, call, output, error=False, complete=True):
         if call is None and self.pending:
             call = self.pending[0]
         if call in self.pending:
@@ -449,10 +456,15 @@ class Projection:
         index = self.calls.get(call)
         if index is not None:
             message = self.messages[index]
-            message.update(detail=output, complete=True, error=bool(error))
+            if output or complete:
+                message["detail"] = output
+            message["complete"] = bool(complete)
+            message["error"] = bool(error)
+            if not complete:
+                self.running.append(index)
         else:
             self.messages.append({"id": identity, "role": "tool", "text": "", "name": None, "detail": output,
-                                  "complete": True, "truncated": False, "error": bool(error),
+                                  "complete": bool(complete), "truncated": False, "error": bool(error),
                                   "_event": False, "_paired": False})
 
 
@@ -522,15 +534,19 @@ def project_pi(record, identity, out):
         out.result(identity, identity, message.get("output") or "", message.get("exitCode") not in (0, None))
 
 
-HOUSEKEEPING = {"CONVERSATION_HISTORY", "CHECKPOINT", "SYSTEM_MESSAGE", "GENERIC"}
+HOUSEKEEPING = {"CONVERSATION_HISTORY", "CHECKPOINT", "SYSTEM_MESSAGE", "EPHEMERAL_MESSAGE", "ERROR_MESSAGE"}
 
 
 def project_antigravity(record, identity, out):
     kind, text = record.get("type"), record.get("content")
     if kind == "USER_INPUT":
+        out.complete_running()
+        out.pending.clear()
         match = re.search(r"<USER_REQUEST>(.*?)</USER_REQUEST>", text or "", re.S)
         out.say(identity, "user", (match.group(1) if match else text or "").strip())
     elif kind == "PLANNER_RESPONSE":
+        out.complete_running()
+        out.pending.clear()
         out.say(identity, "assistant", text or "")
         for index, call in enumerate(record.get("tool_calls") or []):
             if isinstance(call, dict):
@@ -538,9 +554,10 @@ def project_antigravity(record, identity, out):
                 arguments = call.get("args", call.get("arguments"))
                 out.call(block, block, call.get("name") or "tool",
                          arguments if isinstance(arguments, str) else json.dumps(arguments, ensure_ascii=False, indent=2))
-    elif kind and kind not in HOUSEKEEPING and record.get("source") != "USER_EXPLICIT" and out.pending:
-        if record.get("status") != "RUNNING":
-            out.result(identity, None, text or "", record.get("status") == "ERROR")
+    elif kind and kind not in HOUSEKEEPING and record.get("source") not in ("USER_EXPLICIT", "SYSTEM", "SYSTEM_SDK") and out.pending:
+        status = record.get("status")
+        output = text if isinstance(text, str) and text else (record.get("error") or "")
+        out.result(identity, None, output, status == "ERROR", complete=(status != "RUNNING"))
 
 
 PROJECT = {"codex": project_codex, "claude": project_claude, "pi": project_pi,

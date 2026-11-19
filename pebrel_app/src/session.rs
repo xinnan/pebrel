@@ -22,7 +22,10 @@ use crate::display::color::Rgb;
 
 mod identity;
 mod window_layout;
-pub(crate) use identity::codex_rollout_id;
+pub(crate) use identity::{
+    antigravity_transcript_from_artifact_dir, codex_rollout_id,
+    valid_antigravity_conversation_segment, valid_antigravity_transcript_path,
+};
 pub use window_layout::WindowLayout;
 pub(crate) use window_layout::combine_sessions;
 

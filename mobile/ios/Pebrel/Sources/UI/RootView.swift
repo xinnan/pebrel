@@ -460,7 +460,7 @@ struct RootView: View {
                let pane = desktop.panes.first(where: { $0.id == paneId && $0.window == windowId }),
                processId == desktop.runtimeProcess {
                 let effectiveSession = session.isEmpty ? (pane.agent?.kind == kind ? (pane.agent?.sessionId ?? "") : "") : session
-                if (kind == "claude" || kind == "codex") && !effectiveSession.isEmpty {
+                if DesktopConversation.supportedKinds.contains(kind) && !effectiveSession.isEmpty {
                     DesktopConversationScreen(
                         desktop: desktop,
                         pane: pane,

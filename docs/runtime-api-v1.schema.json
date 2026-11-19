@@ -3092,7 +3092,8 @@
         "kind": {
           "enum": [
             "codex",
-            "claude"
+            "claude",
+            "antigravity"
           ]
         },
         "session_id": {
