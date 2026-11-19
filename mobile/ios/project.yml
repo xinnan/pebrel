@@ -1,0 +1,161 @@
+name: Pebrel
+options:
+  bundleIdPrefix: io.github.kuddev.pebrel
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "16.0"
+  createIntermediateGroups: true
+  defaultConfig: Release
+  developmentLanguage: en
+  knownRegions:
+    - en
+    - zh-Hans
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    ENABLE_BITCODE: NO
+    DEAD_CODE_STRIPPING: YES
+    SUPPORTS_MACCATALYST: NO
+    TARGETED_DEVICE_FAMILY: "1,2"
+
+targets:
+  Pebrel:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Pebrel/Sources
+        type: group
+      - path: Pebrel/Resources/Assets.xcassets
+      - path: Pebrel/Resources/PrivacyInfo.xcprivacy
+        buildPhase: resources
+      - path: Pebrel/GeneratedResources/themes.json
+        buildPhase: resources
+      - path: Pebrel/GeneratedResources/host-icons.json
+        buildPhase: resources
+      - path: Pebrel/GeneratedResources/ssh_agent_chat.py
+        buildPhase: resources
+      - path: Pebrel/GeneratedResources/Fonts
+        type: group
+        buildPhase: resources
+      - path: Pebrel/GeneratedResources/Localizations
+        type: group
+        buildPhase: resources
+      - path: Pebrel/GeneratedResources/reader
+        type: folder
+        buildPhase: resources
+      - path: Pebrel/GeneratedResources/licenses
+        type: folder
+        buildPhase: resources
+      - path: Pebrel/GeneratedResources/native-relay
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - framework: Build/Frameworks/PebrelSshFFI.xcframework
+        embed: false
+      - framework: Build/Frameworks/PebrelGhostty.xcframework
+        embed: false
+      - framework: Build/Frameworks/PebrelVoice.xcframework
+        embed: false
+      - sdk: libc++.tbd
+      - sdk: libz.tbd
+      - sdk: Accelerate.framework
+      - sdk: AVFoundation.framework
+      - sdk: CoreGraphics.framework
+      - sdk: CoreText.framework
+      - sdk: CryptoKit.framework
+      - sdk: Network.framework
+      - sdk: Security.framework
+      - sdk: UserNotifications.framework
+      - sdk: WebKit.framework
+    info:
+      path: Pebrel/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Pebrel
+        CFBundleName: Pebrel
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        ITSAppUsesNonExemptEncryption: false
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true
+        UIAppFonts:
+          - MapleMono-NF-CN-Regular.ttf
+          - JetBrainsMono-Regular.ttf
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSCameraUsageDescription: "Pebrel uses the camera to scan desktop pairing QR codes on your device."
+        NSMicrophoneUsageDescription: "Pebrel uses the microphone for local on-device voice transcription."
+        NSLocalNetworkUsageDescription: "Pebrel discovers paired Pebrel desktops on your local network."
+        NSBonjourServices:
+          - _pebrel-pair._tcp
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: false
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.kuddev.pebrel.mobile
+        PRODUCT_NAME: Pebrel
+        MARKETING_VERSION: "2.5.0-preview"
+        CURRENT_PROJECT_VERSION: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-ObjC"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/Frameworks"
+      configs:
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+          GCC_OPTIMIZATION_LEVEL: "0"
+        Release:
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+          SWIFT_COMPILATION_MODE: wholemodule
+
+  PebrelTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: PebrelTests
+        type: group
+    dependencies:
+      - target: Pebrel
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.kuddev.pebrel.mobile.tests
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Pebrel.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Pebrel"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        GENERATE_INFOPLIST_FILE: YES
+        FRAMEWORK_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(BUILT_PRODUCTS_DIR)"
+
+schemes:
+  Pebrel:
+    build:
+      targets:
+        Pebrel: all
+        PebrelTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - PebrelTests
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

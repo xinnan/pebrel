@@ -1,0 +1,10 @@
+Build/
+dist/
+Pebrel.xcodeproj/
+Pebrel/GeneratedResources/
+Pebrel/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png
+Pebrel/Resources/Assets.xcassets/PebrelLogo.imageset/pebrel-logo.png
+*.ipa
+*.xcarchive
+*.dSYM
+.DS_Store

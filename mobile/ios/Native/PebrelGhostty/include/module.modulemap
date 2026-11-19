@@ -1,0 +1,4 @@
+module PebrelGhostty {
+    header "pebrel_ghostty_ios.h"
+    export *
+}

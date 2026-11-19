@@ -1,0 +1,228 @@
+name: iOS Preview IPA package
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Package version (e.g. 2.5.0-preview)
+        required: true
+        default: "2.5.0-preview"
+        type: string
+      build_number:
+        description: CFBundleVersion numeric build number
+        required: true
+        default: "1"
+        type: string
+      source_commit:
+        description: Optional 40-character source commit SHA (defaults to workflow ref SHA)
+        required: false
+        default: ""
+        type: string
+      sign_mode:
+        description: Packaging mode (adhoc for TrollStore/AltStore/Sideloadly, unsigned, or signed with Apple secrets)
+        required: true
+        default: "adhoc"
+        type: choice
+        options:
+          - adhoc
+          - unsigned
+          - signed
+      include_embedded_relay:
+        description: Bundle static Linux pebrel-relay binaries for one-click SSH deployment
+        required: true
+        default: true
+        type: boolean
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      build_number:
+        required: false
+        default: "1"
+        type: string
+      sign_mode:
+        required: false
+        default: "adhoc"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+  RUST_TOOLCHAIN: "1.97.1"
+  CARGO_TERM_COLOR: always
+  SOURCE_COMMIT: ${{ inputs.source_commit || github.sha }}
+
+jobs:
+  relay:
+    if: ${{ inputs.include_embedded_relay != false }}
+    name: Embedded relay (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+      CC: musl-gcc
+      RUSTFLAGS: -C linker=musl-gcc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install native static-link tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+      - uses: ./.github/actions/rust-cache
+        id: rust-cache
+        with:
+          key: ios-relay
+          target: target/${{ matrix.target }}/release
+      - name: Build and package same-source relay
+        env:
+          RELAY_ARCH: ${{ matrix.arch }}
+          RELAY_TARGET: ${{ matrix.target }}
+        run: |
+          cargo build --locked --release -p pebrel-mobile-link --features relay --bin pebrel-relay
+          python3 mobile/tools/package_native_relay.py \
+            --binary "target/$RELAY_TARGET/release/pebrel-relay" \
+            --output relay-assets --arch "$RELAY_ARCH" --commit "$SOURCE_COMMIT"
+      - name: Save compiled relay
+        if: ${{ steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: target/${{ matrix.target }}/release
+          key: ${{ steps.rust-cache.outputs.cache-key }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-relay-${{ matrix.arch }}
+          path: relay-assets
+          if-no-files-found: error
+          retention-days: 7
+
+  ipa:
+    name: iOS IPA (${{ inputs.sign_mode || 'adhoc' }})
+    needs: [relay]
+    if: ${{ always() && (needs.relay.result == 'success' || needs.relay.result == 'skipped') }}
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      PACKAGE_VERSION: ${{ inputs.version }}
+      BUILD_NUMBER: ${{ inputs.build_number || '1' }}
+      SIGN_MODE: ${{ inputs.sign_mode || 'adhoc' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install XcodeGen and CMake
+        run: |
+          brew install xcodegen cmake
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - uses: ./.github/actions/rust-cache
+        id: rust-cache
+        with:
+          key: ios-ssh
+          target: |
+            mobile/ssh/target/aarch64-apple-ios/release
+            mobile/ssh/target/aarch64-apple-ios-sim/release
+      - uses: actions/cache@v4
+        with:
+          path: mobile/ios/Build/ghostty
+          key: ios-ghostty-${{ runner.arch }}-${{ hashFiles('mobile/android/ghostty/UPSTREAM.json', 'mobile/tools/build_ios_ghostty.py', 'mobile/ios/Native/PebrelGhostty/**') }}
+      - uses: actions/cache@v4
+        with:
+          path: mobile/ios/Build/voice
+          key: ios-voice-${{ runner.arch }}-${{ hashFiles('mobile/tools/build_ios_voice.py', 'mobile/ios/Native/PebrelVoice/**') }}
+      - name: Download embedded Linux relay assets
+        if: ${{ needs.relay.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ios-relay-*
+          merge-multiple: true
+          path: mobile/ios/Build/native-relay
+      - name: Import Apple signing identity (signed mode only)
+        if: ${{ env.SIGN_MODE == 'signed' }}
+        env:
+          P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
+          EXPORT_OPTIONS_BASE64: ${{ secrets.APPLE_EXPORT_OPTIONS_PLIST_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+        run: |
+          test -n "$P12_BASE64"
+          test -n "$PROFILE_BASE64"
+          test -n "$EXPORT_OPTIONS_BASE64"
+          KEYCHAIN="$RUNNER_TEMP/pebrel-ios.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security list-keychain -d user -s "$KEYCHAIN"
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "$PROFILE_BASE64" | base64 --decode > "$HOME/Library/MobileDevice/Provisioning Profiles/pebrel.mobileprovision"
+          echo "$EXPORT_OPTIONS_BASE64" | base64 --decode > "$RUNNER_TEMP/ExportOptions.plist"
+      - name: Build XCFrameworks, run XCTest, and package verified IPA
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          RELAY_ARG=()
+          if [[ -d mobile/ios/Build/native-relay ]]; then
+            RELAY_ARG=(--relay-assets mobile/ios/Build/native-relay)
+          fi
+          SIGN_ARGS=()
+          if [[ "$SIGN_MODE" == "signed" ]]; then
+            SIGN_ARGS=(--export-options "$RUNNER_TEMP/ExportOptions.plist")
+            if [[ -n "$APPLE_TEAM_ID" ]]; then
+              SIGN_ARGS+=(--team-id "$APPLE_TEAM_ID")
+            fi
+          fi
+          python3 mobile/tools/build_ios_ipa.py \
+            --version "$PACKAGE_VERSION" \
+            --build-number "$BUILD_NUMBER" \
+            --mode "$SIGN_MODE" \
+            --output dist-ios \
+            "${RELAY_ARG[@]}" \
+            "${SIGN_ARGS[@]}"
+      - name: Save compiled iOS Rust transport
+        if: ${{ steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            mobile/ssh/target/aarch64-apple-ios/release
+            mobile/ssh/target/aarch64-apple-ios-sim/release
+          key: ${{ steps.rust-cache.outputs.cache-key }}
+      - name: Upload iOS IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          compression-level: 0
+          name: pebrel-ios-ipa-${{ env.SIGN_MODE }}
+          path: |
+            dist-ios/*.ipa
+            dist-ios/*.sha256
+            dist-ios/*-report.json
+          if-no-files-found: error
+          retention-days: 14

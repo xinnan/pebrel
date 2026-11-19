@@ -1,0 +1,4 @@
+module PebrelSshFFI {
+    header "pebrel_ssh.h"
+    export *
+}
