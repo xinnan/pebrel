@@ -203,8 +203,8 @@ impl SettingsPane {
                         language.text(Message::HostsImport),
                         Some(&detail),
                         &[
-                            language.text(Message::TransferCancel),
-                            language.text(Message::HostsImport),
+                            gpui::PromptButton::cancel(language.text(Message::TransferCancel)),
+                            gpui::PromptButton::ok(language.text(Message::HostsImport)),
                         ],
                         cx,
                     ))

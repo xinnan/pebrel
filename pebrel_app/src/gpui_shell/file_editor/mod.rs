@@ -460,7 +460,10 @@ impl TextFileView {
             PromptLevel::Warning,
             language.text(Message::EditorDiscardTitle),
             Some(&self.source.display()),
-            &[language.text(Message::EditorCancel), language.text(Message::EditorDiscard)],
+            &[
+                gpui::PromptButton::cancel(language.text(Message::EditorCancel)),
+                gpui::PromptButton::ok(language.text(Message::EditorDiscard)),
+            ],
             cx,
         );
         let handle = window.window_handle();

@@ -43,8 +43,8 @@ pub use gpui_component::WindowExt as _;
 pub use gpui_component::{ActiveTheme, Colorize};
 
 use gpui::{
-    InteractiveElement as _, ParentElement as _, SharedString, Styled as _, Window, div, px,
-    relative,
+    App, FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
+    SharedString, Styled as _, Window, div, px, relative,
 };
 use gpui_component::dialog::{CancelDialog, ConfirmDialog};
 
@@ -100,9 +100,65 @@ pub fn center_modal_dialog(dialog: Dialog, window: &Window, estimated_height: f3
         .px(px(CONFIRM_DIALOG_HORIZONTAL_PADDING))
 }
 
+#[derive(IntoElement)]
+struct ConfirmDialogFooter {
+    ok_text: SharedString,
+    cancel_text: SharedString,
+    ok_variant: ButtonVariant,
+}
+
+impl RenderOnce for ConfirmDialogFooter {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let focus: FocusHandle = window
+            .use_keyed_state("confirm-dialog-footer-focus", cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone();
+        let cancel_focus = focus.clone();
+        let ok_focus = focus.clone();
+        DialogFooter::new().w_full().child(
+            h_flex()
+                .w_full()
+                .gap_2()
+                .track_focus(&focus)
+                .child(
+                    Button::new("confirm-cancel")
+                        .debug_selector(|| "confirm-dialog-cancel".to_owned())
+                        .flex_1()
+                        .label(format!("{}  ⎋", self.cancel_text))
+                        .on_click(move |_, window, cx| {
+                            let handle = window.window_handle();
+                            let target = cancel_focus.clone();
+                            cx.defer(move |cx| {
+                                let _ = handle.update(cx, |_, window, cx| {
+                                    target.dispatch_action(&CancelDialog, window, cx);
+                                });
+                            });
+                        }),
+                )
+                .child(
+                    Button::new("confirm-ok")
+                        .debug_selector(|| "confirm-dialog-ok".to_owned())
+                        .flex_1()
+                        .label(format!("{}  ↵", self.ok_text))
+                        .with_variant(self.ok_variant)
+                        .on_click(move |_, window, cx| {
+                            let handle = window.window_handle();
+                            let target = ok_focus.clone();
+                            cx.defer(move |cx| {
+                                let _ = handle.update(cx, |_, window, cx| {
+                                    target.dispatch_action(&ConfirmDialog, window, cx);
+                                });
+                            });
+                        }),
+                ),
+        )
+    }
+}
+
 /// 构造与旧 GPUI 壳一致的确认框。显式 footer 是必要的：固定依赖版本的普通
 /// Dialog 不会仅凭 button_props 生成按钮。动作必须绑在真实 Button 上；该版本
-/// Button 在按下时会 prevent_default，依赖父容器 click 会让鼠标确认和取消都失效。
+/// Button 在按下时会 prevent_default，依赖父容器 click 会让鼠标确认和取消都失效；
+/// 按钮派发也必须绑定到对话框子树内的 FocusHandle，避免窗口失焦后按钮失效。
 pub fn confirm_dialog(
     dialog: Dialog,
     window: &mut Window,
@@ -135,29 +191,11 @@ pub fn confirm_dialog(
                     .child(content_description.clone()),
             )
         })
-        .footer(
-            DialogFooter::new()
-                .w_full()
-                .child(
-                    Button::new("confirm-cancel")
-                        .debug_selector(|| "confirm-dialog-cancel".to_owned())
-                        .flex_1()
-                        .label(format!("{cancel_text}  ⎋"))
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(CancelDialog), cx);
-                        }),
-                )
-                .child(
-                    Button::new("confirm-ok")
-                        .debug_selector(|| "confirm-dialog-ok".to_owned())
-                        .flex_1()
-                        .label(format!("{ok_text}  ↵"))
-                        .with_variant(ok_variant)
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(ConfirmDialog), cx);
-                        }),
-                ),
-        )
+        .footer(ConfirmDialogFooter {
+            ok_text: ok_text.clone(),
+            cancel_text: cancel_text.clone(),
+            ok_variant,
+        })
         .button_props(
             DialogButtonProps::default()
                 .ok_text(ok_text)
@@ -260,6 +298,30 @@ mod tests {
             Modifiers::default(),
         );
         assert!(confirmed.get(), "鼠标点击确认必须派发 Dialog 的确认动作");
+
+        // Regression: buttons must keep working even if focus leaves the dialog.
+        cancelled.set(false);
+        confirmed.set(false);
+        open_dialog(cx);
+        cx.update(|window, _| window.blur());
+        let cancel = cx.debug_bounds("confirm-dialog-cancel").expect("cancel button bounds");
+        cx.simulate_click(
+            point(
+                cancel.origin.x + cancel.size.width * 0.5,
+                cancel.origin.y + cancel.size.height * 0.5,
+            ),
+            Modifiers::default(),
+        );
+        assert!(cancelled.get(), "失焦后点击取消仍必须派发 Dialog 的取消动作");
+
+        open_dialog(cx);
+        cx.update(|window, _| window.blur());
+        let ok = cx.debug_bounds("confirm-dialog-ok").expect("confirm button bounds");
+        cx.simulate_click(
+            point(ok.origin.x + ok.size.width * 0.5, ok.origin.y + ok.size.height * 0.5),
+            Modifiers::default(),
+        );
+        assert!(confirmed.get(), "失焦后点击确认仍必须派发 Dialog 的确认动作");
     }
 
     #[gpui::test]

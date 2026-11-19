@@ -143,7 +143,10 @@ impl RecipeLibrary {
             gpui::PromptLevel::Warning,
             language.text(Message::RecipeDeleteTitle),
             Some(&recipe.name),
-            &[language.text(Message::EditorCancel), language.text(Message::RecipeDelete)],
+            &[
+                gpui::PromptButton::cancel(language.text(Message::EditorCancel)),
+                gpui::PromptButton::ok(language.text(Message::RecipeDelete)),
+            ],
             cx,
         );
         let executor = cx.background_executor().clone();

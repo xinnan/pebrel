@@ -86,9 +86,9 @@ impl NebulaWorkspace {
                         language.text(Message::EditorCloseTitle),
                         Some(&file.read(cx).source_label()),
                         &[
-                            language.text(Message::EditorSave),
-                            language.text(Message::EditorDiscard),
-                            language.text(Message::EditorCancel),
+                            gpui::PromptButton::ok(language.text(Message::EditorSave)),
+                            gpui::PromptButton::new(language.text(Message::EditorDiscard)),
+                            gpui::PromptButton::cancel(language.text(Message::EditorCancel)),
                         ],
                         cx,
                     );

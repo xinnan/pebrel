@@ -38,6 +38,7 @@ mod molecule_view;
 mod motion;
 pub mod network_settings;
 pub mod prelude;
+pub(crate) mod prompt;
 mod scientific_render;
 pub mod session_restore;
 #[cfg(all(test, feature = "gpui-test-support"))]
@@ -312,6 +313,8 @@ fn init(cx: &mut App, startup_window: config::StartupWindow) {
     terminal::init(cx);
     workspace::init(cx);
     toast::init(cx);
+    #[cfg(target_os = "linux")]
+    prompt::init(cx);
 }
 
 fn register_bundled_fonts(cx: &App) {

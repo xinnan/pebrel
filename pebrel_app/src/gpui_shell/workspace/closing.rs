@@ -81,6 +81,9 @@ impl NebulaWorkspace {
         self.theme_transition.clear(window);
         windowing::quick_terminal_bounds_changed(self.runtime_window_id, window, cx);
         if self.window_close_pending {
+            if window.has_active_prompt() {
+                window.activate_window();
+            }
             return false;
         }
         let persist_session = self.window_role == windowing::WindowRole::Regular;
@@ -252,7 +255,10 @@ pub(super) async fn confirm_incomplete_session(
             gpui::PromptLevel::Warning,
             language.text(Message::SessionExitIncompleteTitle),
             Some(language.text(Message::SessionExitIncompleteBody)),
-            &[language.text(Message::EditorCancel), language.text(Message::SessionExitAnyway)],
+            &[
+                gpui::PromptButton::cancel(language.text(Message::EditorCancel)),
+                gpui::PromptButton::ok(language.text(Message::SessionExitAnyway)),
+            ],
             cx,
         )
     });
@@ -310,5 +316,42 @@ mod tests {
                 "the prompt cannot stop a pane before durable saving"
             );
         }
+    }
+
+    #[gpui::test]
+    async fn missing_identity_linux_prompt_supports_click_and_escape(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(crate::gpui_shell::config::Settings::load(
+                pebrel_settings::ThemeName::Nord,
+            ));
+            cx.set_prompt_builder(crate::gpui_shell::prompt::build_prompt);
+        });
+        let window = cx.add_empty_window();
+        window.simulate_resize(gpui::size(px(960.0), px(640.0)));
+        let handle = window.update(|window, _| window.window_handle());
+
+        let cancel_task = window
+            .spawn(move |mut cx| async move { confirm_incomplete_session(handle, &mut cx).await });
+        window.run_until_parked();
+        window.update(|window, cx| {
+            assert!(window.has_active_prompt());
+            let _ = window.draw(cx);
+        });
+        window.simulate_keystrokes("escape");
+        assert!(!cancel_task.await);
+        assert!(!window.update(|window, _| window.has_active_prompt()));
+
+        let confirm_task = window
+            .spawn(move |mut cx| async move { confirm_incomplete_session(handle, &mut cx).await });
+        window.run_until_parked();
+        window.update(|window, cx| {
+            assert!(window.has_active_prompt());
+            let _ = window.draw(cx);
+        });
+        let confirm = window.debug_bounds("window-prompt-action-1").expect("confirm button bounds");
+        window.simulate_click(confirm.center(), gpui::Modifiers::default());
+        assert!(confirm_task.await);
+        assert!(!window.update(|window, _| window.has_active_prompt()));
     }
 }
