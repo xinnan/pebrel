@@ -80,9 +80,10 @@ def main() -> None:
             "-S", str(sources),
             "-B", str(build_dir),
             "-DCMAKE_SYSTEM_NAME=iOS",
-            f"-DCMAKE_OSX_SYSROOT={sdk_path}",
+            f"-DCMAKE_OSX_SYSROOT={sdk}",
             f"-DCMAKE_OSX_ARCHITECTURES={spec['cmake_arch']}",
             f"-DCMAKE_OSX_DEPLOYMENT_TARGET={args.deployment_target}",
+            "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY",
             "-DCMAKE_BUILD_TYPE=Release",
             "-DBUILD_SHARED_LIBS=OFF",
             "-DWHISPER_BUILD_TESTS=OFF",
@@ -98,7 +99,11 @@ def main() -> None:
         subprocess.run(cmake_cmd, check=True)
         subprocess.run(["cmake", "--build", str(build_dir), "--config", "Release", "--parallel"], check=True)
 
-        static_libs = sorted(p for p in build_dir.rglob("*.a") if p.is_file() and p.stat().st_size > 0)
+        static_libs = sorted(
+            p
+            for p in build_dir.rglob("*.a")
+            if p.is_file() and p.stat().st_size > 0 and "CMakeFiles" not in p.parts
+        )
         if not any(p.name == "libwhisper.a" for p in static_libs):
             raise RuntimeError(f"Missing libwhisper.a in {build_dir}")
 

@@ -60,7 +60,7 @@ def zig_macos_host(machine: str) -> tuple[str, str, str]:
 
 def build_env(sources: Path, output: Path) -> dict[str, str]:
     env = os.environ.copy()
-    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "SDKROOT"):
         env.pop(name, None)
     env.update(
         ZIG_GLOBAL_CACHE_DIR=str(output / "cache/global"),
@@ -139,11 +139,10 @@ def main() -> None:
                 str(zig),
                 "build",
                 "-Demit-lib-vt",
+                "-Demit-xcframework=false",
                 "-Doptimize=ReleaseFast",
                 f"-Dtarget={zig_target}",
                 "-Dcpu=baseline",
-                "--sysroot",
-                sdk_path,
                 "--prefix",
                 str(prefix),
                 "--cache-dir",

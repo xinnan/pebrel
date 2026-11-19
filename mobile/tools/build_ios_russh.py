@@ -74,10 +74,11 @@ def main() -> None:
 
     for slice_name in selected:
         triple, sdk = TARGETS[slice_name]
-        sdk_path = subprocess.check_output(["xcrun", "--sdk", sdk, "--show-sdk-path"], text=True, encoding="utf-8").strip()
         env = os.environ.copy()
+        # Never set global SDKROOT here: Cargo compiles build.rs and proc-macros
+        # for the macOS host while rustc/cc auto-select the iOS SDK per target.
+        env.pop("SDKROOT", None)
         env["IPHONEOS_DEPLOYMENT_TARGET"] = args.deployment_target
-        env["SDKROOT"] = sdk_path
         print(f"Building pebrel-mobile-ssh for {triple} ({sdk})", flush=True)
         subprocess.run(
             [
