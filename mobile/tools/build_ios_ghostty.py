@@ -146,6 +146,69 @@ def resolve_prebuilt_vt(
     )
 
 
+def extract_ar_members(archive: Path, destination: Path) -> list[Path]:
+    """Extract object members from a BSD/GNU static archive (.a).
+
+    Zig 0.15.2 emits BSD `#1/<n>` archive headers with 4-byte rather than 8-byte
+    member payload alignment, causing Apple's `libtool` to warn and drop members
+    like `compiler_rt.o` ("64-bit mach-o not 8-byte aligned"). Extracting the
+    raw `.o` members and handing them directly to `xcrun libtool -static` lets
+    Apple's toolchain produce a properly 8-byte-aligned static archive.
+    """
+    data = archive.read_bytes()
+    if not data.startswith(b"!<arch>\n"):
+        raise ValueError(f"Not a valid ar archive: {archive}")
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+
+    members: list[Path] = []
+    gnu_names = b""
+    pos = 8
+    while pos + 60 <= len(data):
+        header = data[pos : pos + 60]
+        if header[58:60] != b"`\n":
+            raise ValueError(f"Corrupt ar member header at offset {pos} in {archive}")
+        raw_name = header[0:16].decode("ascii")
+        size = int(header[48:58].decode("ascii").strip())
+        payload_start = pos + 60
+        payload_end = payload_start + size
+        if payload_end > len(data):
+            raise ValueError(f"Truncated ar member at offset {pos} in {archive}")
+        payload = data[payload_start:payload_end]
+        pos = payload_end + (payload_end & 1)
+
+        if raw_name.startswith("#1/"):
+            name_len = int(raw_name[3:].strip())
+            member_name = payload[:name_len].split(b"\x00", 1)[0].decode("utf-8", "replace")
+            obj_bytes = payload[name_len:]
+        elif raw_name.strip() == "//":
+            gnu_names = payload
+            continue
+        elif raw_name.strip() in ("/", "/SYM64/"):
+            continue
+        elif raw_name.startswith("/") and raw_name[1:].strip().isdigit():
+            offset = int(raw_name[1:].strip())
+            end = gnu_names.find(b"\n", offset)
+            raw_entry = gnu_names[offset:] if end == -1 else gnu_names[offset:end]
+            member_name = raw_entry.decode("utf-8", "replace").rstrip("/")
+            obj_bytes = payload
+        else:
+            member_name = raw_name.strip().rstrip("/")
+            obj_bytes = payload
+
+        if member_name in ("", "__.SYMDEF", "__.SYMDEF SORTED", "__.SYMDEF_64", "__.SYMDEF_64 SORTED"):
+            continue
+        safe_name = Path(member_name).name or f"member_{len(members)}.o"
+        out_file = destination / f"{len(members):03d}-{safe_name}"
+        out_file.write_bytes(obj_bytes)
+        members.append(out_file)
+
+    if not members:
+        raise ValueError(f"No object members found in archive: {archive}")
+    return members
+
+
 def copy_prebuilt_licenses(prebuilt_root: Path, destination: Path) -> None:
     root = prebuilt_root.resolve()
     for candidate in (
@@ -355,8 +418,17 @@ def main() -> None:
             ],
             check=True,
         )
+        vt_members = extract_ar_members(vt_lib, prefix / "vt-objects")
         subprocess.run(
-            ["xcrun", "libtool", "-static", "-o", str(combined_lib), str(vt_lib), str(bridge_obj)],
+            [
+                "xcrun",
+                "libtool",
+                "-static",
+                "-o",
+                str(combined_lib),
+                *(str(member) for member in vt_members),
+                str(bridge_obj),
+            ],
             check=True,
         )
         (prefix / "SOURCE.json").write_text(

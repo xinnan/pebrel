@@ -257,6 +257,53 @@ class IosToolsTest(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 build_ios_ghostty.resolve_prebuilt_vt(art, "ios-arm64", expected_revision="rev-abc")
 
+    def test_extract_ar_members_handles_unaligned_bsd_archive_and_rejects_invalid(self) -> None:
+        def bsd_member(name: str, payload: bytes) -> bytes:
+            name_bytes = name.encode("utf-8")
+            # Mirror Zig 0.15.2's 4-byte-padded BSD `#1/<n>` member name length.
+            padded_len = (len(name_bytes) + 3) & ~3
+            padded_name = name_bytes.ljust(padded_len, b"\x00")
+            body = padded_name + payload
+            hdr = (
+                f"#1/{padded_len:<13}"
+                f"{'0':<12}"
+                f"{'0':<6}"
+                f"{'0':<6}"
+                f"{'100644':<8}"
+                f"{len(body):<10}"
+                "`\n"
+            ).encode("ascii")
+            assert len(hdr) == 60
+            return hdr + body + (b"\n" if len(body) % 2 == 1 else b"")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            macho_a = struct.pack("<IIII", 0xFEEDFACF, 0x0100000C, 0, 1) + b"AAAA"
+            macho_b = struct.pack("<IIII", 0xFEEDFACF, 0x0100000C, 0, 1) + b"BBBB"
+            archive = root / "libghostty-vt.a"
+            archive.write_bytes(
+                b"!<arch>\n"
+                + bsd_member("__.SYMDEF", b"\x00" * 16)
+                + bsd_member("libghostty-vt-static_zcu.o", macho_a)
+                + bsd_member("compiler_rt.o", macho_b)
+            )
+            extracted = build_ios_ghostty.extract_ar_members(archive, root / "objs")
+            self.assertEqual([p.name for p in extracted], ["000-libghostty-vt-static_zcu.o", "001-compiler_rt.o"])
+            self.assertEqual(extracted[0].read_bytes(), macho_a)
+            self.assertEqual(extracted[1].read_bytes(), macho_b)
+
+            # Negative case: invalid magic
+            bad = root / "not-an-archive.a"
+            bad.write_bytes(b"NOT_AR")
+            with self.assertRaises(ValueError):
+                build_ios_ghostty.extract_ar_members(bad, root / "bad-objs")
+
+            # Negative case: symbol table only (no objects)
+            sym_only = root / "sym-only.a"
+            sym_only.write_bytes(b"!<arch>\n" + bsd_member("__.SYMDEF", b"\x00" * 8))
+            with self.assertRaises(ValueError):
+                build_ios_ghostty.extract_ar_members(sym_only, root / "sym-objs")
+
 
 if __name__ == "__main__":
     unittest.main()

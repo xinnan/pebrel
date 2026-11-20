@@ -25,8 +25,11 @@ PINS = ROOT / "mobile/android/ghostty/UPSTREAM.json"
 
 
 def digest(path: Path) -> str:
+    hasher = hashlib.sha256()
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
 def zig_host(system: str, machine: str) -> tuple[str, str]:
@@ -63,7 +66,23 @@ def source_archive(url: str, expected: str, archive: Path, extracted: Path) -> P
                 package.extractall(destination)
         else:
             with tarfile.open(archive) as tar:
-                tar.extractall(destination, filter="data")
+                if hasattr(tarfile, "data_filter"):
+                    tar.extractall(destination, filter="data")
+                else:
+                    dest_root = destination.resolve()
+                    for member in tar.getmembers():
+                        target_path = (destination / member.name).resolve()
+                        if not target_path.is_relative_to(dest_root):
+                            raise RuntimeError("Tool archive contains a path outside the output directory")
+                        if member.issym():
+                            link_target = (target_path.parent / member.linkname).resolve()
+                            if not link_target.is_relative_to(dest_root):
+                                raise RuntimeError("Tool archive contains a symlink outside the output directory")
+                        elif member.islnk():
+                            link_target = (destination / member.linkname).resolve()
+                            if not link_target.is_relative_to(dest_root):
+                                raise RuntimeError("Tool archive contains a hardlink outside the output directory")
+                    tar.extractall(destination)
         marker.write_text(expected + "\n", encoding="utf-8")
     directories = [entry for entry in destination.iterdir() if entry.is_dir()]
     if len(directories) != 1:

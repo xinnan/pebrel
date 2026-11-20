@@ -1,4 +1,6 @@
 """Build Android palette assets from Pebrel's single desktop theme authority."""
+from __future__ import annotations
+
 from pathlib import Path
 import argparse
 import json
