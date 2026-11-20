@@ -391,7 +391,22 @@ def transcript(kind, agents, cwd):
             paths = glob.glob(os.path.join(HOME, ".pi/agent/sessions", folder, "*.jsonl"))
     else:
         brain = os.path.join(HOME, ".gemini/antigravity-cli/brain")
-        session = option(agent["args"], "--conversation")
+        session = None
+        for row in agents:
+            try:
+                for fd in os.listdir("/proc/%d/fd" % row["pid"]):
+                    target = os.readlink("/proc/%d/fd/%s" % (row["pid"], fd))
+                    if "/.gemini/antigravity-cli/presence/" in target and target.endswith(".lock"):
+                        cand = os.path.basename(target)[:-5]
+                        if cand and "/" not in cand and cand not in (".", ".."):
+                            session = cand
+                            break
+            except OSError:
+                pass
+            if session:
+                break
+        if not session:
+            session = option(agent["args"], "--conversation")
         folders = [os.path.join(brain, session)] if session and "/" not in session else glob.glob(os.path.join(brain, "*"))
         paths = []
         for folder in folders:

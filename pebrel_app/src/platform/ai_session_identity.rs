@@ -19,6 +19,9 @@ use super::process_snapshot::is_codex_process_name;
 mod macos;
 #[cfg(windows)]
 mod windows;
+mod antigravity;
+
+pub(crate) use antigravity::probe_antigravity_session;
 
 /// Native probe helpers run before GUI, hooks or CLI setup.
 pub(crate) fn run_helper_if_requested() -> Option<i32> {

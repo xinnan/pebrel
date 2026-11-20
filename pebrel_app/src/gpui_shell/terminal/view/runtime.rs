@@ -909,14 +909,22 @@ impl TerminalView {
         if self.exited.is_some()
             || self.ai_session_probe_pending
             || self.ssh_destination.is_some()
-            || !self
-                .running_program
-                .as_deref()
-                .and_then(crate::ai_agents::AgentKind::parse)
-                .is_some_and(|agent| agent == crate::ai_agents::AgentKind::Codex)
         {
             return;
         }
+        let Some(agent_kind) = self
+            .running_program
+            .as_deref()
+            .and_then(crate::ai_agents::AgentKind::parse)
+            .filter(|agent| {
+                matches!(
+                    agent,
+                    crate::ai_agents::AgentKind::Codex | crate::ai_agents::AgentKind::Antigravity
+                )
+            })
+        else {
+            return;
+        };
         if self.last_ai_session_probe.is_some_and(|at| {
             at.elapsed()
                 < std::time::Duration::from_secs(if self.ai_session.is_some() { 10 } else { 2 })
@@ -931,14 +939,28 @@ impl TerminalView {
         self.ai_session_probe_pending = true;
         self.last_ai_session_probe = Some(std::time::Instant::now());
         let work = cx.background_executor().spawn(async move {
-            crate::platform::ai_session_identity::probe_codex_session(
-                pane_id,
-                Some(&exec_context),
-                shell_pid,
-            )
+            match agent_kind {
+                crate::ai_agents::AgentKind::Codex => {
+                    crate::platform::ai_session_identity::probe_codex_session(
+                        pane_id,
+                        Some(&exec_context),
+                        shell_pid,
+                    )
+                    .map(|s| (s.session_id, s.session_file, s.cwd))
+                },
+                crate::ai_agents::AgentKind::Antigravity => {
+                    crate::platform::ai_session_identity::probe_antigravity_session(
+                        pane_id,
+                        Some(&exec_context),
+                        shell_pid,
+                    )
+                    .map(|s| (s.session_id, s.session_file, None))
+                },
+                _ => None,
+            }
         });
         cx.spawn(async move |this, cx| {
-            let session_id = work.await;
+            let probed = work.await;
             let _ = this.update(cx, |view, cx| {
                 if view.ai_session_probe_epoch == epoch {
                     view.ai_session_probe_pending = false;
@@ -948,15 +970,19 @@ impl TerminalView {
                     epoch,
                     view.session_agent() != previous_target,
                     view.running_program.as_deref(),
+                    agent_kind,
                 ) {
                     return;
                 }
-                if let Some(session) = session_id {
-                    log::debug!("agent session identity from active rollout: pane={pane_id}");
+                if let Some((session_id, session_file, cwd)) = probed {
+                    let source = agent_kind.slug().to_owned();
+                    log::debug!(
+                        "agent session identity from active process probe: source={source} pane={pane_id}"
+                    );
                     let target = crate::session::AgentSession {
-                        source: "codex".to_owned(),
-                        session_id: Some(session.session_id.clone()),
-                        session_file: Some(session.session_file),
+                        source: source.clone(),
+                        session_id: Some(session_id.clone()),
+                        session_file: Some(session_file),
                     };
                     let previous = view.recovery.target.clone();
                     if !view.recovery.confirm(target) {
@@ -966,10 +992,10 @@ impl TerminalView {
                         cx.emit(TerminalViewEvent::SessionIdentityChanged);
                     }
                     view.ai_session = Some(crate::display::AiSessionIdentity {
-                        source: "codex".to_owned(),
-                        session_id: session.session_id,
+                        source,
+                        session_id,
                     });
-                    if let Some(cwd) = session.cwd {
+                    if let Some(cwd) = cwd {
                         view.process_event(pebrel_terminal::event::Event::CwdReport(cwd), cx);
                     }
                     view.ai_session_from_probe = true;
@@ -1375,12 +1401,13 @@ fn probe_result_is_current(
     result_epoch: u64,
     has_session: bool,
     running_program: Option<&str>,
+    expected_kind: crate::ai_agents::AgentKind,
 ) -> bool {
     current_epoch == result_epoch
         && !has_session
         && running_program
             .and_then(crate::ai_agents::AgentKind::parse)
-            .is_some_and(|agent| agent == crate::ai_agents::AgentKind::Codex)
+            .is_some_and(|agent| agent == expected_kind)
 }
 
 /// 一次写入是谁发起的。安全判定不看写了什么，看谁让写的。
@@ -1488,10 +1515,12 @@ mod tests {
 
     #[test]
     fn a_probe_from_an_older_command_cannot_claim_a_new_codex_process() {
-        assert!(!probe_result_is_current(8, 7, false, Some("codex")));
-        assert!(!probe_result_is_current(8, 8, true, Some("codex")));
-        assert!(!probe_result_is_current(8, 8, false, Some("claude")));
-        assert!(probe_result_is_current(8, 8, false, Some("codex")));
+        assert!(!probe_result_is_current(8, 7, false, Some("codex"), crate::ai_agents::AgentKind::Codex));
+        assert!(!probe_result_is_current(8, 8, true, Some("codex"), crate::ai_agents::AgentKind::Codex));
+        assert!(!probe_result_is_current(8, 8, false, Some("claude"), crate::ai_agents::AgentKind::Codex));
+        assert!(probe_result_is_current(8, 8, false, Some("codex"), crate::ai_agents::AgentKind::Codex));
+        assert!(probe_result_is_current(8, 8, false, Some("antigravity"), crate::ai_agents::AgentKind::Antigravity));
+        assert!(!probe_result_is_current(8, 8, false, Some("codex"), crate::ai_agents::AgentKind::Antigravity));
     }
 
     /// 强制层的判据：本地内容不得由程序自动送进远端 pane，用户当场选中则放行。

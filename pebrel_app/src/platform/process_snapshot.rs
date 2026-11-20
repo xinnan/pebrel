@@ -76,6 +76,14 @@ pub(crate) fn is_codex_process_name(name: &str) -> bool {
     matches!(name, "codex" | "codex.exe") || name.starts_with("codex-")
 }
 
+#[cfg(unix)]
+pub(crate) fn is_antigravity_process_name(name: &str) -> bool {
+    matches!(
+        name,
+        "agy" | "antigravity" | "antigravity-cli" | "agy.exe" | "antigravity.exe" | "antigravity-cli.exe"
+    )
+}
+
 /// Parse the stable three-column `ps` output used by Unix snapshots. The
 /// command column is the remainder so executable paths containing spaces are
 /// not split into a fake fourth field.

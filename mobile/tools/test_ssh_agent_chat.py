@@ -226,6 +226,22 @@ class AntigravityProjectionTest(unittest.TestCase):
         self.assertEqual("all done", out.messages[3]["text"])
         self.assertEqual(("boom", True, True), (out.messages[4]["detail"], out.messages[4]["complete"], out.messages[4]["error"]))
 
+    def test_presence_lock_fd_resolves_antigravity_transcript_without_flag(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            conv = "1f01e5af-a1a9-443a-b393-2cb617faab4d"
+            logs = Path(tmp) / ".gemini/antigravity-cli/brain" / conv / ".system_generated/logs"
+            logs.mkdir(parents=True)
+            expected = logs / "transcript_full.jsonl"
+            expected.write_text('{"step_index":0,"type":"USER_INPUT","content":"hi"}\n', encoding="utf-8")
+            lock_target = os.path.join(tmp, ".gemini/antigravity-cli/presence", conv + ".lock")
+            agents = [{"pid": 4242, "age": 5, "args": "agy"}]
+            with mock.patch.object(chat, "HOME", tmp), \
+                    mock.patch.object(chat.os, "listdir", return_value=["27"]), \
+                    mock.patch.object(chat.os, "readlink", return_value=lock_target):
+                found = chat.transcript("antigravity", agents, "/work")
+            self.assertEqual(str(expected), found)
+
 
 if __name__ == "__main__":
     unittest.main()
