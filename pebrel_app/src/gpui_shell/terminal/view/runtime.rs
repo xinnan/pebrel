@@ -179,6 +179,9 @@ impl TerminalView {
         exit_code: Option<i32>,
         cx: &mut Context<Self>,
     ) {
+        if self.command_running || self.running_program.is_some() {
+            self.retire_command_images(cx);
+        }
         let choose_codex_session = self.codex_restore_target_missing(exit_code);
         self.notify_command_done(exit_code, cx);
         self.last_command_failed = exit_code.is_some_and(|code| code != 0);
@@ -637,14 +640,13 @@ impl TerminalView {
         }
         let bytes =
             crate::input::terminal_input::build_runtime_text_sequence(&command, self.term_mode());
-        let submit_bytes = self.runtime_key_sequence(
+        self.runtime_key_sequence(
             crate::runtime_api::RuntimeKey::Enter,
             crate::runtime_api::RuntimeKeyModifiers::default(),
             1,
         )?;
         self.pending_runtime_submit = Some(crate::display::state::RuntimeSubmitBarrier {
             baseline_screen: self.runtime_screen_snapshot().unwrap_or_default(),
-            submit_bytes,
         });
         self.capture_runtime_prompt();
         let run = crate::runtime_api::begin_runtime_run();
@@ -716,7 +718,6 @@ impl TerminalView {
             } else {
                 self.pending_runtime_submit = Some(crate::display::state::RuntimeSubmitBarrier {
                     baseline_screen: self.runtime_screen_snapshot().unwrap_or_default(),
-                    submit_bytes,
                 });
             }
         }
@@ -850,14 +851,13 @@ impl TerminalView {
         let codex_submit =
             submit && self.runtime_agent().is_some_and(|agent| agent.kind == "codex");
         if submit && !codex_submit {
-            let submit_bytes = self.runtime_key_sequence(
+            self.runtime_key_sequence(
                 crate::runtime_api::RuntimeKey::Enter,
                 crate::runtime_api::RuntimeKeyModifiers::default(),
                 1,
             )?;
             self.pending_runtime_submit = Some(crate::display::state::RuntimeSubmitBarrier {
                 baseline_screen: self.runtime_screen_snapshot().unwrap_or_default(),
-                submit_bytes,
             });
         }
         if codex_submit {
@@ -1212,6 +1212,7 @@ impl TerminalView {
     pub(super) fn mark_command_running(&mut self) {
         self.consume_native_prompt();
         if !self.command_running {
+            self.assign_pasted_images_to_command();
             self.prompt_process_probe = None;
             self.last_prompt_process_probe = None;
             self.command_started = Some(std::time::Instant::now());
@@ -1378,8 +1379,14 @@ impl TerminalView {
         if screen == pending.baseline_screen {
             return;
         }
-        let pending = self.pending_runtime_submit.take().expect("checked above");
-        self.write_input(pending.submit_bytes, cx);
+        // A cold CLI can negotiate a different keyboard protocol while its
+        // text is being echoed. Encode Enter at delivery, never at queuing.
+        let submit_bytes = crate::input::terminal_input::build_runtime_deferred_submission(
+            self.running_program.as_deref(),
+            self.term_mode(),
+        );
+        self.pending_runtime_submit = None;
+        self.write_input(submit_bytes, cx);
     }
 }
 
