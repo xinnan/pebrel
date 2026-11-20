@@ -24,17 +24,33 @@ Run the **`iOS Preview IPA package`** workflow ([`.github/workflows/ios-release.
 
 ### Option B: Local macOS build
 
-Prerequisites on macOS (Apple Silicon recommended, Xcode 16.x–26.3; Xcode 26.4+ SDK breaks pinned Zig 0.15.2 linking):
+Prerequisites on macOS (Apple Silicon recommended):
 
 ```bash
 brew install xcodegen cmake
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 ```
 
-One-command ad-hoc / unsigned `.ipa` build:
+One-command ad-hoc / unsigned `.ipa` build (Xcode 16.x–26.3):
 
 ```bash
 python3 mobile/tools/build_ios_ipa.py --version 2.5.0-preview --mode adhoc --output mobile/ios/dist
+```
+
+#### Xcode 26.4+ / 27.x (macOS SDK incompatible with pinned Zig `0.15.2`)
+
+Pinned Zig `0.15.2` cannot parse `libSystem.tbd` from Xcode 26.4+ / 27.x macOS SDKs when linking `build.zig`. Skip Zig on macOS by passing `--prebuilt-vt` with static `libghostty-vt.a` slices cross-compiled on Linux (either downloaded from the CI workflow's `ios-ghostty-vt` artifact or built locally on any Linux host):
+
+```bash
+# On Linux (or download the `ios-ghostty-vt` artifact from GitHub Actions):
+python3 mobile/tools/build_ios_ghostty.py --vt-only --slice all --output mobile/ios/Build
+
+# On macOS with Xcode 26.4+ / 27.x:
+python3 mobile/tools/build_ios_ipa.py \
+  --version 2.5.0-preview \
+  --mode adhoc \
+  --prebuilt-vt mobile/ios/Build/ghostty-vt \
+  --output mobile/ios/dist
 ```
 
 Signed `.ipa` build (copy `ExportOptions.template.plist` and fill in your Team ID and Provisioning Profile):

@@ -117,11 +117,43 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  ghostty-vt:
+    name: Ghostty libghostty-vt (iOS static slices)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/cache@v4
+        with:
+          path: mobile/ios/Build/ghostty
+          key: linux-ios-ghostty-vt-${{ runner.arch }}-${{ hashFiles('mobile/android/ghostty/UPSTREAM.json', 'mobile/tools/build_ios_ghostty.py') }}
+      - name: Cross-compile static libghostty-vt.a for iOS + Simulator
+        run: |
+          python3 mobile/tools/build_ios_ghostty.py \
+            --vt-only \
+            --slice all \
+            --output mobile/ios/Build
+      - name: Upload prebuilt Ghostty VT artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ghostty-vt
+          path: |
+            mobile/ios/Build/ghostty/out
+            mobile/ios/Build/ghostty/licenses
+            mobile/ios/Build/ghostty/PREBUILT.json
+          if-no-files-found: error
+          retention-days: 14
+
   ipa:
     name: iOS IPA (${{ inputs.sign_mode || 'adhoc' }})
-    needs: [relay]
-    if: ${{ always() && (needs.relay.result == 'success' || needs.relay.result == 'skipped') }}
-    runs-on: macos-15
+    needs: [relay, ghostty-vt]
+    if: ${{ always() && !cancelled() && needs.ghostty-vt.result == 'success' && (needs.relay.result == 'success' || needs.relay.result == 'skipped') }}
+    runs-on: macos-26
     timeout-minutes: 120
     env:
       PACKAGE_VERSION: ${{ inputs.version }}
@@ -155,12 +187,13 @@ jobs:
             mobile/ssh/target/aarch64-apple-ios-sim/release
       - uses: actions/cache@v4
         with:
-          path: mobile/ios/Build/ghostty
-          key: ios-ghostty-${{ runner.arch }}-${{ hashFiles('mobile/android/ghostty/UPSTREAM.json', 'mobile/tools/build_ios_ghostty.py', 'mobile/ios/Native/PebrelGhostty/**') }}
-      - uses: actions/cache@v4
-        with:
           path: mobile/ios/Build/voice
           key: ios-voice-${{ runner.arch }}-${{ hashFiles('mobile/tools/build_ios_voice.py', 'mobile/ios/Native/PebrelVoice/**') }}
+      - name: Download prebuilt Ghostty VT slices
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-ghostty-vt
+          path: mobile/ios/Build/ghostty-vt
       - name: Download embedded Linux relay assets
         if: ${{ needs.relay.result == 'success' }}
         uses: actions/download-artifact@v4
@@ -210,6 +243,7 @@ jobs:
             --build-number "$BUILD_NUMBER" \
             --mode "$SIGN_MODE" \
             --output dist-ios \
+            --prebuilt-vt mobile/ios/Build/ghostty-vt \
             "${RELAY_ARG[@]}" \
             "${SIGN_ARGS[@]}"
       - name: Save compiled iOS Rust transport

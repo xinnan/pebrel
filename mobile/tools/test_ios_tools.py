@@ -15,6 +15,7 @@ TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
+import build_ios_ghostty
 import generate_ios_assets
 import ios_xcframework
 import verify_ios_ipa
@@ -164,6 +165,97 @@ class IosToolsTest(unittest.TestCase):
             self.assertEqual(info["CFBundlePackageType"], "FMWK")
             self.assertEqual(info["CFBundleIdentifier"], "io.github.kuddev.pebrel.mobile.demo")
             self.assertEqual(info["MinimumOSVersion"], "16.0")
+
+    def test_zig_host_pin_selects_linux_and_macos_and_rejects_unknown(self) -> None:
+        pins = json.loads(build_ios_ghostty.PINS.read_text(encoding="utf-8"))
+        url, sha, archive = build_ios_ghostty.zig_host_pin("Linux", "x86_64", pins)
+        self.assertEqual(url, pins["zig_url"])
+        self.assertEqual(sha, pins["zig_sha256"])
+        self.assertEqual(archive, "zig-linux-x86_64.tar.xz")
+
+        url_arm, sha_arm, archive_arm = build_ios_ghostty.zig_host_pin("Linux", "aarch64", pins)
+        self.assertEqual(url_arm, pins["zig_linux_arm64_url"])
+        self.assertEqual(sha_arm, pins["zig_linux_arm64_sha256"])
+        self.assertEqual(archive_arm, "zig-linux-arm64.tar.xz")
+
+        url_mac, _, archive_mac = build_ios_ghostty.zig_host_pin("Darwin", "arm64", pins)
+        self.assertIn("aarch64-macos-0.15.2", url_mac)
+        self.assertEqual(archive_mac, "zig-aarch64-macos.tar.xz")
+
+        with self.assertRaises(SystemExit):
+            build_ios_ghostty.zig_host_pin("Windows", "AMD64", pins)
+        with self.assertRaises(SystemExit):
+            build_ios_ghostty.zig_host_pin("Linux", "riscv64", pins)
+
+    def test_write_static_vt_wrapper_references_ghostty_static_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sources = root / "sources/ghostty"
+            sources.mkdir(parents=True)
+            wrapper = build_ios_ghostty.write_static_vt_wrapper(root / "wrapper", sources)
+            zon = (wrapper / "build.zig.zon").read_text(encoding="utf-8")
+            zig = (wrapper / "build.zig").read_text(encoding="utf-8")
+            self.assertIn('.path = "../sources/ghostty"', zon)
+            self.assertIn("0x9362cfe2028b69d2", zon)
+            self.assertIn('ghostty.artifact("ghostty-vt-static")', zig)
+            self.assertIn('"libghostty-vt.a"', zig)
+
+    def test_resolve_prebuilt_vt_and_licenses_positive_and_negative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Layout 1: CI artifact / ghostty work root (`out/<slice>`, `licenses/Ghostty`, `PREBUILT.json`)
+            art = root / "artifact"
+            lib = art / "out/ios-arm64/lib/libghostty-vt.a"
+            hdr = art / "out/ios-arm64/include/ghostty/vt.h"
+            lib.parent.mkdir(parents=True)
+            hdr.parent.mkdir(parents=True)
+            lib.write_bytes(b"!<arch>\nfake")
+            hdr.write_text("#pragma once\n", encoding="utf-8")
+            (art / "PREBUILT.json").write_text(json.dumps({"revision": "rev-abc"}), encoding="utf-8")
+            lic = art / "licenses/Ghostty/Ghostty-MIT.txt"
+            lic.parent.mkdir(parents=True)
+            lic.write_text("MIT", encoding="utf-8")
+
+            resolved_lib, resolved_inc = build_ios_ghostty.resolve_prebuilt_vt(
+                art, "ios-arm64", expected_revision="rev-abc"
+            )
+            self.assertEqual(resolved_lib, lib.resolve())
+            self.assertEqual(resolved_inc, (art / "out/ios-arm64/include").resolve())
+
+            dst_lic = root / "dst-licenses"
+            build_ios_ghostty.copy_prebuilt_licenses(art, dst_lic)
+            self.assertEqual((dst_lic / "Ghostty-MIT.txt").read_text(encoding="utf-8"), "MIT")
+
+            # Layout 2: passing `--output` root of `--vt-only` (`ghostty/out/<slice>`, `ghostty/licenses/Ghostty`)
+            out_root = root / "vt-only-out"
+            lib2 = out_root / "ghostty/out/ios-arm64-simulator/lib/libghostty-vt.a"
+            hdr2 = out_root / "ghostty/out/ios-arm64-simulator/include/ghostty/vt.h"
+            lib2.parent.mkdir(parents=True)
+            hdr2.parent.mkdir(parents=True)
+            lib2.write_bytes(b"!<arch>\nsim")
+            hdr2.write_text("#pragma once\n", encoding="utf-8")
+            lic2 = out_root / "ghostty/licenses/Ghostty/Zig-MIT.txt"
+            lic2.parent.mkdir(parents=True)
+            lic2.write_text("ZIG", encoding="utf-8")
+
+            resolved_lib2, _ = build_ios_ghostty.resolve_prebuilt_vt(out_root, "ios-arm64-simulator")
+            self.assertEqual(resolved_lib2, lib2.resolve())
+            dst_lic2 = root / "dst-licenses-2"
+            build_ios_ghostty.copy_prebuilt_licenses(out_root, dst_lic2)
+            self.assertEqual((dst_lic2 / "Zig-MIT.txt").read_text(encoding="utf-8"), "ZIG")
+
+            # Negative case 1: mismatched revision in PREBUILT.json
+            with self.assertRaises(ValueError):
+                build_ios_ghostty.resolve_prebuilt_vt(art, "ios-arm64", expected_revision="rev-different")
+
+            # Negative case 2: missing slice
+            with self.assertRaises(FileNotFoundError):
+                build_ios_ghostty.resolve_prebuilt_vt(art, "ios-arm64-simulator", expected_revision="rev-abc")
+
+            # Negative case 3: zero-byte archive rejected
+            lib.write_bytes(b"")
+            with self.assertRaises(FileNotFoundError):
+                build_ios_ghostty.resolve_prebuilt_vt(art, "ios-arm64", expected_revision="rev-abc")
 
 
 if __name__ == "__main__":

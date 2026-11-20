@@ -55,6 +55,12 @@ def main() -> None:
     parser.add_argument("--mode", choices=("unsigned", "adhoc", "signed"), default="adhoc")
     parser.add_argument("--output", type=Path, default=IOS_DIR / "dist")
     parser.add_argument("--relay-assets", type=Path, default=None)
+    parser.add_argument(
+        "--prebuilt-vt",
+        type=Path,
+        default=None,
+        help="Use prebuilt libghostty-vt.a slices (skips Zig; works with Xcode 26.4+/27.x).",
+    )
     parser.add_argument("--skip-native", action="store_true")
     parser.add_argument("--skip-voice", action="store_true")
     parser.add_argument("--skip-tests", action="store_true")
@@ -70,7 +76,17 @@ def main() -> None:
     slice_arg = "ios-arm64" if args.skip_tests else "all"
 
     if not args.skip_native:
-        run([py, str(TOOLS_DIR / "build_ios_ghostty.py"), "--slice", slice_arg, "--deployment-target", args.deployment_target])
+        ghostty_cmd = [
+            py,
+            str(TOOLS_DIR / "build_ios_ghostty.py"),
+            "--slice",
+            slice_arg,
+            "--deployment-target",
+            args.deployment_target,
+        ]
+        if args.prebuilt_vt is not None:
+            ghostty_cmd.extend(["--prebuilt-vt", str(args.prebuilt_vt)])
+        run(ghostty_cmd)
         run([py, str(TOOLS_DIR / "build_ios_russh.py"), "--slice", slice_arg, "--deployment-target", args.deployment_target])
         if not args.skip_voice:
             run([py, str(TOOLS_DIR / "build_ios_voice.py"), "--slice", slice_arg, "--deployment-target", args.deployment_target])

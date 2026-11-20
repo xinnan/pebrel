@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -51,13 +50,115 @@ SLICES = {
 }
 
 
-def zig_macos_host(machine: str) -> tuple[str, str, str]:
+def zig_host_pin(system: str, machine: str, pins: dict[str, str]) -> tuple[str, str, str]:
     arch = machine.lower()
-    if arch in ("arm64", "aarch64"):
-        return ZIG_MACOS_PINS["arm64"]
-    if arch in ("x86_64", "amd64"):
-        return ZIG_MACOS_PINS["x86_64"]
-    raise SystemExit(f"Unsupported macOS architecture: {machine}")
+    if system == "Darwin":
+        if arch in ("arm64", "aarch64"):
+            return ZIG_MACOS_PINS["arm64"]
+        if arch in ("x86_64", "amd64"):
+            return ZIG_MACOS_PINS["x86_64"]
+        raise SystemExit(f"Unsupported macOS architecture: {machine}")
+    if system == "Linux":
+        if arch in ("x86_64", "amd64"):
+            return pins["zig_url"], pins["zig_sha256"], "zig-linux-x86_64.tar.xz"
+        if arch in ("aarch64", "arm64"):
+            return pins["zig_linux_arm64_url"], pins["zig_linux_arm64_sha256"], "zig-linux-arm64.tar.xz"
+        raise SystemExit(f"Unsupported Linux architecture: {machine}")
+    raise SystemExit(f"Unsupported host platform for Zig iOS VT build: {system}/{machine}")
+
+
+def write_static_vt_wrapper(wrapper_dir: Path, sources: Path) -> Path:
+    """Create a minimal Zig package that builds only Ghostty's static libghostty-vt.a.
+
+    Building Ghostty's default install step also attempts to link libghostty-vt.dylib,
+    which requires an Apple SDK and fails when cross-compiling from Linux. Depending on
+    Ghostty as a local package and selecting only `artifact("ghostty-vt-static")` avoids
+    touching upstream sources while producing the exact static archive and headers.
+    """
+    wrapper_dir.mkdir(parents=True, exist_ok=True)
+    rel_ghostty = os.path.relpath(sources.resolve(), wrapper_dir.resolve()).replace(os.sep, "/")
+    (wrapper_dir / "build.zig.zon").write_text(
+        ".{\n"
+        "    .name = .pebrel_ghostty_vt_static,\n"
+        '    .version = "0.1.0",\n'
+        "    .fingerprint = 0x9362cfe2028b69d2,\n"
+        '    .paths = .{ "build.zig", "build.zig.zon" },\n'
+        "    .dependencies = .{\n"
+        f'        .ghostty = .{{ .path = "{rel_ghostty}" }},\n'
+        "    },\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (wrapper_dir / "build.zig").write_text(
+        'const std = @import("std");\n\n'
+        "pub fn build(b: *std.Build) void {\n"
+        "    const target = b.standardTargetOptions(.{});\n"
+        "    const optimize = b.standardOptimizeOption(.{});\n"
+        '    const simd = b.option(bool, "simd", "Enable SIMD") orelse false;\n'
+        '    const ghostty = b.dependency("ghostty", .{\n'
+        "        .target = target,\n"
+        "        .optimize = optimize,\n"
+        "        .simd = simd,\n"
+        "    });\n"
+        '    const lib = ghostty.artifact("ghostty-vt-static");\n'
+        '    const install_lib = b.addInstallFileWithDir(lib.getEmittedBin(), .lib, "libghostty-vt.a");\n'
+        "    b.getInstallStep().dependOn(&install_lib.step);\n"
+        "    b.installDirectory(.{\n"
+        '        .source_dir = ghostty.path("include/ghostty"),\n'
+        "        .install_dir = .header,\n"
+        '        .install_subdir = "ghostty",\n'
+        "    });\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    return wrapper_dir
+
+
+def resolve_prebuilt_vt(
+    prebuilt_root: Path,
+    slice_name: str,
+    expected_revision: str | None = None,
+) -> tuple[Path, Path]:
+    root = prebuilt_root.resolve()
+    if expected_revision is not None:
+        for meta_path in (root / "PREBUILT.json", root / "ghostty/PREBUILT.json"):
+            if meta_path.is_file():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                found_rev = meta.get("revision")
+                if found_rev != expected_revision:
+                    raise ValueError(
+                        f"Prebuilt Ghostty VT revision {found_rev!r} in {meta_path} "
+                        f"does not match pinned revision {expected_revision!r}"
+                    )
+                break
+    candidates = [
+        root / "out" / slice_name,
+        root / "ghostty/out" / slice_name,
+        root / slice_name,
+    ]
+    for base in candidates:
+        vt_lib = base / "lib/libghostty-vt.a"
+        vt_include = base / "include"
+        if vt_lib.is_file() and vt_lib.stat().st_size > 0 and (vt_include / "ghostty/vt.h").is_file():
+            return vt_lib, vt_include
+    raise FileNotFoundError(
+        f"Missing prebuilt libghostty-vt.a or include/ghostty/vt.h for slice {slice_name} under {root}"
+    )
+
+
+def copy_prebuilt_licenses(prebuilt_root: Path, destination: Path) -> None:
+    root = prebuilt_root.resolve()
+    for candidate in (
+        root / "licenses/Ghostty",
+        root / "ghostty/licenses/Ghostty",
+        root / "Frameworks/licenses/Ghostty",
+    ):
+        if candidate.is_dir():
+            if destination.exists():
+                shutil.rmtree(destination)
+            shutil.copytree(candidate, destination)
+            return
+    destination.mkdir(parents=True, exist_ok=True)
 
 
 def build_env(sources: Path, output: Path) -> dict[str, str]:
@@ -66,7 +167,7 @@ def build_env(sources: Path, output: Path) -> dict[str, str]:
         env.pop(name, None)
     env.update(
         ZIG_GLOBAL_CACHE_DIR=str(output / "cache/global"),
-        GIT_CEILING_DIRECTORIES=str(sources.resolve().parent),
+        GIT_CEILING_DIRECTORIES=str(output.resolve()),
     )
     return env
 
@@ -94,70 +195,135 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--slice", choices=("ios-arm64", "ios-arm64-simulator", "all"), default="all")
     parser.add_argument("--deployment-target", default="16.0")
+    parser.add_argument(
+        "--vt-only",
+        action="store_true",
+        help="Build only static libghostty-vt.a slices + headers + licenses (works on Linux or macOS).",
+    )
+    parser.add_argument(
+        "--prebuilt-vt",
+        type=Path,
+        default=None,
+        help="Use prebuilt libghostty-vt.a slices (skips Zig; works with Xcode 26.4+/27.x).",
+    )
     args = parser.parse_args()
 
-    if platform.system() != "Darwin":
-        raise SystemExit("Building iOS Ghostty XCFramework requires macOS with Xcode.")
+    if args.vt_only and args.prebuilt_vt is not None:
+        raise SystemExit("Cannot pass both --vt-only and --prebuilt-vt.")
+    if not args.vt_only and platform.system() != "Darwin":
+        raise SystemExit("Building iOS Ghostty XCFramework requires macOS with Xcode (or pass --vt-only on Linux).")
 
     pins = json.loads(PINS.read_text(encoding="utf-8"))
     output = args.output.resolve()
     ghostty_work = output / "ghostty"
     frameworks = output / "Frameworks"
-    frameworks.mkdir(parents=True, exist_ok=True)
-
-    zig_url, zig_sha, zig_archive = zig_macos_host(platform.machine())
-    sources = source_archive(
-        pins["source_url"],
-        pins["source_sha256"],
-        ghostty_work / "downloads/terminal-core.tar.gz",
-        ghostty_work / "sources",
-    )
-    zig_root = source_archive(
-        zig_url,
-        zig_sha,
-        ghostty_work / "downloads" / zig_archive,
-        ghostty_work / "tools",
-    )
-    zig = zig_root / "zig"
-    if subprocess.check_output([str(zig), "version"], text=True, encoding="utf-8").strip() != pins["zig_version"]:
-        raise SystemExit("Unexpected Zig version")
-
-    env = build_env(sources, ghostty_work)
     selected = list(SLICES.keys()) if args.slice == "all" else [args.slice]
-    staged_frameworks: list[Path] = []
 
+    sources: Path | None = None
+    zig_root: Path | None = None
+    if args.prebuilt_vt is None:
+        zig_url, zig_sha, zig_archive = zig_host_pin(platform.system(), platform.machine(), pins)
+        sources = source_archive(
+            pins["source_url"],
+            pins["source_sha256"],
+            ghostty_work / "downloads/terminal-core.tar.gz",
+            ghostty_work / "sources",
+        )
+        zig_root = source_archive(
+            zig_url,
+            zig_sha,
+            ghostty_work / "downloads" / zig_archive,
+            ghostty_work / "tools",
+        )
+        zig = zig_root / "zig"
+        if subprocess.check_output([str(zig), "version"], text=True, encoding="utf-8").strip() != pins["zig_version"]:
+            raise SystemExit("Unexpected Zig version")
+
+        env = build_env(sources, ghostty_work)
+        use_static_wrapper = platform.system() != "Darwin" or args.vt_only
+        wrapper_dir = write_static_vt_wrapper(ghostty_work / "wrapper", sources) if use_static_wrapper else None
+
+        for slice_name in selected:
+            spec = SLICES[slice_name]
+            zig_target = spec["zig_target"].format(ver=args.deployment_target)
+            prefix = ghostty_work / "out" / slice_name
+            prefix.mkdir(parents=True, exist_ok=True)
+            print(f"Building libghostty-vt {pins['revision']} for {slice_name} ({zig_target})", flush=True)
+            if wrapper_dir is not None:
+                simd_flag = "true" if platform.system() == "Darwin" else "false"
+                cmd = [
+                    str(zig),
+                    "build",
+                    "-Doptimize=ReleaseFast",
+                    f"-Dsimd={simd_flag}",
+                    f"-Dtarget={zig_target}",
+                    f"-Dcpu={spec['zig_cpu']}",
+                    "--prefix",
+                    str(prefix),
+                    "--cache-dir",
+                    str(ghostty_work / "cache" / slice_name),
+                ]
+                cwd = wrapper_dir
+            else:
+                cmd = [
+                    str(zig),
+                    "build",
+                    "-Demit-lib-vt",
+                    "-Demit-xcframework=false",
+                    "-Doptimize=ReleaseFast",
+                    f"-Dtarget={zig_target}",
+                    f"-Dcpu={spec['zig_cpu']}",
+                    "--prefix",
+                    str(prefix),
+                    "--cache-dir",
+                    str(ghostty_work / "cache" / slice_name),
+                ]
+                cwd = sources
+            subprocess.run(cmd, cwd=cwd, env=env, check=True)
+            vt_lib = prefix / "lib/libghostty-vt.a"
+            if not vt_lib.is_file() or vt_lib.stat().st_size == 0:
+                raise RuntimeError(f"Missing static library: {vt_lib}")
+
+        if args.vt_only:
+            copy_licenses(sources, zig_root, ghostty_work / "cache/global", ghostty_work / "licenses/Ghostty")
+            shutil.copy2(PINS, ghostty_work / "licenses/Ghostty-UPSTREAM.json")
+            prebuilt_meta = {
+                "revision": pins["revision"],
+                "zig_version": pins["zig_version"],
+                "deployment_target": args.deployment_target,
+                "host": f"{platform.system()}/{platform.machine()}",
+                "slices": {
+                    s: {
+                        "library": f"out/{s}/lib/libghostty-vt.a",
+                        "sha256": digest(ghostty_work / "out" / s / "lib/libghostty-vt.a"),
+                    }
+                    for s in selected
+                },
+            }
+            (ghostty_work / "PREBUILT.json").write_text(json.dumps(prebuilt_meta, indent=2) + "\n", encoding="utf-8")
+            print(f"Built prebuilt VT slices under {ghostty_work}", flush=True)
+            return
+
+    frameworks.mkdir(parents=True, exist_ok=True)
+    staged_frameworks: list[Path] = []
     for slice_name in selected:
         spec = SLICES[slice_name]
         sdk = spec["sdk"]
         sdk_path = subprocess.check_output(["xcrun", "--sdk", sdk, "--show-sdk-path"], text=True, encoding="utf-8").strip()
-        zig_target = spec["zig_target"].format(ver=args.deployment_target)
         clang_target = spec["clang_target"].format(ver=args.deployment_target)
         prefix = ghostty_work / "out" / slice_name
         prefix.mkdir(parents=True, exist_ok=True)
 
-        print(f"Building libghostty-vt {pins['revision']} for {slice_name} ({zig_target})", flush=True)
-        subprocess.run(
-            [
-                str(zig),
-                "build",
-                "-Demit-lib-vt",
-                "-Demit-xcframework=false",
-                "-Doptimize=ReleaseFast",
-                f"-Dtarget={zig_target}",
-                f"-Dcpu={spec['zig_cpu']}",
-                "--prefix",
-                str(prefix),
-                "--cache-dir",
-                str(ghostty_work / "cache" / slice_name),
-            ],
-            cwd=sources,
-            env=env,
-            check=True,
-        )
-        vt_lib = prefix / "lib/libghostty-vt.a"
-        vt_include = prefix / "include"
-        if not vt_lib.is_file() or vt_lib.stat().st_size == 0:
-            raise RuntimeError(f"Missing static library: {vt_lib}")
+        if args.prebuilt_vt is not None:
+            vt_lib, vt_include = resolve_prebuilt_vt(
+                args.prebuilt_vt,
+                slice_name,
+                expected_revision=pins["revision"],
+            )
+            print(f"Using prebuilt libghostty-vt for {slice_name}: {vt_lib}", flush=True)
+        else:
+            vt_lib = prefix / "lib/libghostty-vt.a"
+            vt_include = prefix / "include"
 
         bridge_obj = prefix / "pebrel_ghostty_ios.o"
         combined_lib = prefix / "libpebrel_ghostty.a"
@@ -210,7 +376,11 @@ def main() -> None:
 
     xcframework = frameworks / "PebrelGhostty.xcframework"
     create_xcframework(staged_frameworks, xcframework)
-    copy_licenses(sources, zig_root, ghostty_work / "cache/global", frameworks / "licenses/Ghostty")
+    if args.prebuilt_vt is not None:
+        copy_prebuilt_licenses(args.prebuilt_vt, frameworks / "licenses/Ghostty")
+    else:
+        assert sources is not None and zig_root is not None
+        copy_licenses(sources, zig_root, ghostty_work / "cache/global", frameworks / "licenses/Ghostty")
     shutil.copy2(PINS, frameworks / "licenses/Ghostty-UPSTREAM.json")
     print(f"Created {xcframework}", flush=True)
 
