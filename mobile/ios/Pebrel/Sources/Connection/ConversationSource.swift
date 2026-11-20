@@ -60,6 +60,58 @@ func sshAgentDisplayName(_ kind: String) -> String {
     }
 }
 
+enum ConversationAutoEntry {
+    struct DesktopTarget: Equatable {
+        let kind: String
+        let session: String
+    }
+
+    static func desktopTarget(for pane: DesktopPane) -> DesktopTarget? {
+        guard let agent = pane.agent,
+              DesktopConversation.supportedKinds.contains(agent.kind),
+              let sid = agent.sessionId,
+              !sid.isEmpty else {
+            return nil
+        }
+        return DesktopTarget(kind: agent.kind, session: sid)
+    }
+
+    static func desktopKey(
+        desktopId: String,
+        windowId: Int64,
+        paneId: Int64,
+        kind: String,
+        session: String
+    ) -> String {
+        "desktop:\(desktopId):\(windowId):\(paneId):\(kind):\(session)"
+    }
+
+    static func desktopPanePrefix(desktopId: String, windowId: Int64, paneId: Int64) -> String {
+        "desktop:\(desktopId):\(windowId):\(paneId):"
+    }
+
+    static func sshKind(status: String, foreground: SshForeground?) -> String? {
+        guard status == "ready",
+              let agent = foreground?.agent,
+              !agent.isEmpty else {
+            return nil
+        }
+        return agent
+    }
+
+    static func sshKind(for session: ManagedTerminalSession) -> String? {
+        sshKind(status: session.status, foreground: session.foreground)
+    }
+
+    static func sshKey(sessionId: String, kind: String) -> String {
+        "ssh:\(sessionId):\(kind)"
+    }
+
+    static func sshSessionPrefix(sessionId: String) -> String {
+        "ssh:\(sessionId):"
+    }
+}
+
 struct SshForeground: Equatable {
     let program: String
     let cwd: String

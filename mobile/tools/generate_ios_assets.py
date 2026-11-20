@@ -7,7 +7,9 @@ import json
 from pathlib import Path
 import re
 import shutil
+import struct
 import xml.etree.ElementTree as ET
+import zlib
 
 from generate_assets import theme_palettes
 
@@ -194,6 +196,142 @@ def generate_host_icons(root: Path) -> list[dict[str, str]]:
     return icons
 
 
+def _paeth_predictor(a: int, b: int, c: int) -> int:
+    p = a + b - c
+    pa = abs(p - a)
+    pb = abs(p - b)
+    pc = abs(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    if pb <= pc:
+        return b
+    return c
+
+
+def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
+    crc = zlib.crc32(chunk_type + payload) & 0xFFFFFFFF
+    return struct.pack(">I", len(payload)) + chunk_type + payload + struct.pack(">I", crc)
+
+
+def render_opaque_ios_app_icon(source_png: Path, target_png: Path) -> None:
+    """Convert the desktop RGBA squircle logo into a full-bleed opaque RGB iOS AppIcon.
+
+    iOS applies its own squircle mask and composites transparent AppIcon pixels over black,
+    which produces a dark ring if a macOS/desktop RGBA icon is copied verbatim.
+    """
+    data = source_png.read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError(f"Not a valid PNG: {source_png}")
+
+    pos = 8
+    width = height = bit_depth = color_type = interlace = 0
+    idat_parts: list[bytes] = []
+    while pos + 8 <= len(data):
+        length, ctype = struct.unpack(">I4s", data[pos : pos + 8])
+        chunk_data = data[pos + 8 : pos + 8 + length]
+        pos += 12 + length
+        if ctype == b"IHDR":
+            width, height, bit_depth, color_type, _, _, interlace = struct.unpack(">IIBBBBB", chunk_data)
+        elif ctype == b"IDAT":
+            idat_parts.append(chunk_data)
+        elif ctype == b"IEND":
+            break
+
+    if bit_depth != 8 or color_type not in (2, 6) or interlace != 0 or width <= 0 or height <= 0:
+        raise ValueError(
+            f"Unsupported PNG format for iOS AppIcon: {width}x{height} depth={bit_depth} type={color_type} interlace={interlace}"
+        )
+
+    bpp = 4 if color_type == 6 else 3
+    stride = width * bpp
+    raw = zlib.decompress(b"".join(idat_parts))
+    if len(raw) != height * (1 + stride):
+        raise ValueError("Decompressed PNG payload size mismatch")
+
+    # Reconstruct scanlines from PNG row filters.
+    rows: list[bytearray] = []
+    prev = bytearray(stride)
+    offset = 0
+    for _ in range(height):
+        ftype = raw[offset]
+        offset += 1
+        src = raw[offset : offset + stride]
+        offset += stride
+        cur = bytearray(src)
+        if ftype == 0:
+            pass
+        elif ftype == 1:
+            for i in range(bpp, stride):
+                cur[i] = (cur[i] + cur[i - bpp]) & 0xFF
+        elif ftype == 2:
+            for i in range(stride):
+                cur[i] = (cur[i] + prev[i]) & 0xFF
+        elif ftype == 3:
+            for i in range(stride):
+                left = cur[i - bpp] if i >= bpp else 0
+                cur[i] = (cur[i] + ((left + prev[i]) >> 1)) & 0xFF
+        elif ftype == 4:
+            for i in range(stride):
+                left = cur[i - bpp] if i >= bpp else 0
+                up = prev[i]
+                up_left = prev[i - bpp] if i >= bpp else 0
+                cur[i] = (cur[i] + _paeth_predictor(left, up, up_left)) & 0xFF
+        else:
+            raise ValueError(f"Unsupported PNG filter type: {ftype}")
+        rows.append(cur)
+        prev = cur
+
+    # Sample the clean tile background well inside the rounded border stroke and outside the central mark.
+    inset = int(round(min(width, height) * 0.14))
+    sample_x = (width // 2) * bpp
+    sample_row = rows[inset]
+    bg_r, bg_g, bg_b = sample_row[sample_x], sample_row[sample_x + 1], sample_row[sample_x + 2]
+    bg_pixel = bytes((bg_r, bg_g, bg_b))
+    full_bg_scanline = b"\x00" + (bg_pixel * width)
+    left_pad = bg_pixel * inset
+    right_pad = bg_pixel * (width - (width - inset))
+
+    out_scanlines: list[bytes] = []
+    for y in range(height):
+        if y < inset or y >= height - inset:
+            out_scanlines.append(full_bg_scanline)
+            continue
+        row = rows[y]
+        inner = bytearray((width - 2 * inset) * 3)
+        dst = 0
+        if bpp == 4:
+            for x in range(inset, width - inset):
+                si = x * 4
+                a = row[si + 3]
+                if a == 255:
+                    inner[dst] = row[si]
+                    inner[dst + 1] = row[si + 1]
+                    inner[dst + 2] = row[si + 2]
+                elif a == 0:
+                    inner[dst] = bg_r
+                    inner[dst + 1] = bg_g
+                    inner[dst + 2] = bg_b
+                else:
+                    inv = 255 - a
+                    inner[dst] = (row[si] * a + bg_r * inv + 127) // 255
+                    inner[dst + 1] = (row[si + 1] * a + bg_g * inv + 127) // 255
+                    inner[dst + 2] = (row[si + 2] * a + bg_b * inv + 127) // 255
+                dst += 3
+        else:
+            inner[:] = row[inset * 3 : (width - inset) * 3]
+        out_scanlines.append(b"\x00" + left_pad + bytes(inner) + right_pad)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    compressed = zlib.compress(b"".join(out_scanlines), level=9)
+    png_bytes = (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", compressed)
+        + _png_chunk(b"IEND", b"")
+    )
+    target_png.write_bytes(png_bytes)
+
+
 def generate_app_icon(root: Path, catalog: Path) -> None:
     catalog.mkdir(parents=True, exist_ok=True)
     (catalog / "Contents.json").write_text(
@@ -204,7 +342,7 @@ def generate_app_icon(root: Path, catalog: Path) -> None:
     appicon.mkdir(parents=True, exist_ok=True)
     source_icon = root / "extra/logo/nebula-titanium.png"
     target_icon = appicon / "AppIcon-1024.png"
-    shutil.copyfile(source_icon, target_icon)
+    render_opaque_ios_app_icon(source_icon, target_icon)
     (appicon / "Contents.json").write_text(
         json.dumps(
             {

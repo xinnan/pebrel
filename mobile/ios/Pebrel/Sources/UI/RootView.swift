@@ -25,6 +25,7 @@ struct RootView: View {
     @State private var route: AppRoute = .home
     @State private var initializedRoute = false
     @State private var sftpPaths: [String: String] = [:]
+    @State private var suppressedConversations: Set<String> = []
 
     // Global sheets & dialogs
     @State private var showSwitcher = false
@@ -74,7 +75,12 @@ struct RootView: View {
         .onChange(of: notificationDelegate.pendingDeepLink) { link in
             guard let link else { return }
             notificationDelegate.pendingDeepLink = nil
-            route = .pane(desktopId: link.desktopId, windowId: link.windowId, paneId: link.paneId, processId: link.processId)
+            if let desk = repository.desktops.first(where: { $0.id == link.desktopId }),
+               let pane = desk.panes.first(where: { $0.id == link.paneId && $0.window == link.windowId }) {
+                openDesktopPane(desktopId: link.desktopId, pane: pane, processIdOverride: link.processId)
+            } else {
+                route = .pane(desktopId: link.desktopId, windowId: link.windowId, paneId: link.paneId, processId: link.processId)
+            }
         }
         .sheet(isPresented: $showNewConnection, onDismiss: runPendingSheetAction) {
             NewConnectionSheet(
@@ -97,7 +103,7 @@ struct RootView: View {
                     }
                 },
                 onOpenHosts: { showSwitcher = false; route = .hosts },
-                onOpenSession: { sid in showSwitcher = false; route = .terminal(sessionId: sid) },
+                onOpenSession: { sid in showSwitcher = false; openSshSession(sessionId: sid) },
                 onOpenSftpTab: { tab in showSwitcher = false; route = .sftpFile(sessionId: tab.sessionId, tabId: tab.id) },
                 onCloseSftpTab: { tab in repository.closeSftpTab(id: tab.id) },
                 onOpenDesktop: { did in showSwitcher = false; route = .desktop(desktopId: did) },
@@ -232,7 +238,7 @@ struct RootView: View {
         case .home:
             HomeView(
                 repository: repository,
-                onOpenSession: { route = .terminal(sessionId: $0) },
+                onOpenSession: { openSshSession(sessionId: $0) },
                 onOpenSwitcher: { showSwitcher = true },
                 onOpenHosts: { route = .hosts },
                 onConnectHost: { connectHost($0) },
@@ -288,7 +294,10 @@ struct RootView: View {
                         route = .home
                     },
                     onOpenSftp: { route = .sftp(sessionId: session.id) },
-                    onOpenConversation: { kind in route = .sshChat(sessionId: session.id, kind: kind) },
+                    onOpenConversation: { kind in
+                        suppressedConversations.remove(ConversationAutoEntry.sshKey(sessionId: session.id, kind: kind))
+                        route = .sshChat(sessionId: session.id, kind: kind)
+                    },
                     onAttachRemote: { att in
                         if let newId = repository.newSshTab(from: session.id, attachment: att) {
                             route = .terminal(sessionId: newId)
@@ -296,6 +305,15 @@ struct RootView: View {
                     }
                 )
                 .id(sessionId)
+                .onAppear {
+                    maybeAutoEnterSshConversation(session: session)
+                }
+                .onChange(of: session.foreground) { _ in
+                    maybeAutoEnterSshConversation(session: session)
+                }
+                .onChange(of: session.status) { _ in
+                    maybeAutoEnterSshConversation(session: session)
+                }
             } else {
                 Color.clear.onAppear { route = .home }
             }
@@ -306,7 +324,11 @@ struct RootView: View {
                     session: session,
                     kind: kind,
                     repository: repository,
-                    onBack: { route = .terminal(sessionId: sessionId) },
+                    onBack: { route = .home },
+                    onOpenTerminal: {
+                        suppressedConversations.insert(ConversationAutoEntry.sshKey(sessionId: sessionId, kind: kind))
+                        route = .terminal(sessionId: sessionId)
+                    },
                     onSwitcher: { showSwitcher = true }
                 )
                 .id("\(sessionId):\(kind)")
@@ -400,18 +422,34 @@ struct RootView: View {
                     },
                     onOpenConversation: {
                         if let ag = pane.agent {
+                            let sid = ag.sessionId ?? ""
+                            if !sid.isEmpty {
+                                suppressedConversations.remove(ConversationAutoEntry.desktopKey(
+                                    desktopId: desktopId,
+                                    windowId: windowId,
+                                    paneId: paneId,
+                                    kind: ag.kind,
+                                    session: sid
+                                ))
+                            }
                             route = .conversation(
                                 desktopId: desktopId,
                                 windowId: windowId,
                                 paneId: paneId,
                                 kind: ag.kind,
-                                session: ag.sessionId ?? "",
+                                session: sid,
                                 processId: desktop.runtimeProcess
                             )
                         }
                     }
                 )
                 .id("\(desktopId):\(windowId):\(paneId)")
+                .onAppear {
+                    maybeAutoEnterDesktopConversation(desktop: desktop, pane: pane, processId: processId)
+                }
+                .onChange(of: pane.agent) { _ in
+                    maybeAutoEnterDesktopConversation(desktop: desktop, pane: pane, processId: processId)
+                }
             } else {
                 DesktopSessionChangedView(
                     reconnecting: repository.desktops.first(where: { $0.id == desktopId })?.status == "connecting",
@@ -458,7 +496,7 @@ struct RootView: View {
         case .conversation(let desktopId, let windowId, let paneId, let kind, let session, let processId):
             if let desktop = repository.desktops.first(where: { $0.id == desktopId }),
                let pane = desktop.panes.first(where: { $0.id == paneId && $0.window == windowId }),
-               processId == desktop.runtimeProcess {
+               (processId == nil || processId == desktop.runtimeProcess) {
                 let effectiveSession = session.isEmpty ? (pane.agent?.kind == kind ? (pane.agent?.sessionId ?? "") : "") : session
                 if DesktopConversation.supportedKinds.contains(kind) && !effectiveSession.isEmpty {
                     DesktopConversationScreen(
@@ -467,6 +505,16 @@ struct RootView: View {
                         identity: ConversationIdentity(kind: kind, session: effectiveSession, epoch: nil),
                         repository: repository,
                         onBack: {
+                            route = .desktop(desktopId: desktopId)
+                        },
+                        onOpenTerminal: {
+                            suppressedConversations.insert(ConversationAutoEntry.desktopKey(
+                                desktopId: desktopId,
+                                windowId: windowId,
+                                paneId: paneId,
+                                kind: kind,
+                                session: effectiveSession
+                            ))
                             route = .pane(desktopId: desktopId, windowId: windowId, paneId: paneId, processId: processId)
                         },
                         onSwitcher: { showSwitcher = true },
@@ -476,13 +524,18 @@ struct RootView: View {
                 } else {
                     VStack(spacing: 0) {
                         PebrelPageHeader(L10n.tr("chat_title"), onBack: {
-                            route = .pane(desktopId: desktopId, windowId: windowId, paneId: paneId, processId: processId)
+                            route = .desktop(desktopId: desktopId)
                         })
                         VStack(spacing: 12) {
                             Text(L10n.tr("chat_unavailable"))
                                 .font(.subheadline)
                                 .foregroundStyle(activePalette.muted)
                                 .multilineTextAlignment(.center)
+                            Button(L10n.tr("ios_session_terminal")) {
+                                route = .pane(desktopId: desktopId, windowId: windowId, paneId: paneId, processId: processId)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(activePalette.primary)
                         }
                         .padding(24)
                         Spacer()
@@ -552,9 +605,85 @@ struct RootView: View {
         }
     }
 
-    private func openDesktopPane(desktopId: String, pane: DesktopPane) {
-        let proc = repository.desktops.first(where: { $0.id == desktopId })?.runtimeProcess
-        route = .pane(desktopId: desktopId, windowId: pane.window, paneId: pane.id, processId: proc)
+    private func openSshSession(sessionId: String) {
+        if let session = repository.sessions.first(where: { $0.id == sessionId }),
+           let kind = ConversationAutoEntry.sshKind(for: session) {
+            suppressedConversations.remove(ConversationAutoEntry.sshKey(sessionId: sessionId, kind: kind))
+            route = .sshChat(sessionId: sessionId, kind: kind)
+        } else {
+            route = .terminal(sessionId: sessionId)
+        }
+    }
+
+    private func openDesktopPane(desktopId: String, pane: DesktopPane, processIdOverride: Int64? = nil) {
+        let proc = processIdOverride ?? repository.desktops.first(where: { $0.id == desktopId })?.runtimeProcess
+        if let target = ConversationAutoEntry.desktopTarget(for: pane) {
+            suppressedConversations.remove(ConversationAutoEntry.desktopKey(
+                desktopId: desktopId,
+                windowId: pane.window,
+                paneId: pane.id,
+                kind: target.kind,
+                session: target.session
+            ))
+            route = .conversation(
+                desktopId: desktopId,
+                windowId: pane.window,
+                paneId: pane.id,
+                kind: target.kind,
+                session: target.session,
+                processId: proc
+            )
+        } else {
+            route = .pane(desktopId: desktopId, windowId: pane.window, paneId: pane.id, processId: proc)
+        }
+    }
+
+    private func maybeAutoEnterDesktopConversation(
+        desktop: ManagedDesktopSession,
+        pane: DesktopPane,
+        processId: Int64?
+    ) {
+        guard case .pane(let curDesk, let curWin, let curPane, _) = route,
+              curDesk == desktop.id, curWin == pane.window, curPane == pane.id else {
+            return
+        }
+        if let target = ConversationAutoEntry.desktopTarget(for: pane) {
+            let key = ConversationAutoEntry.desktopKey(
+                desktopId: desktop.id,
+                windowId: pane.window,
+                paneId: pane.id,
+                kind: target.kind,
+                session: target.session
+            )
+            guard !suppressedConversations.contains(key) else { return }
+            route = .conversation(
+                desktopId: desktop.id,
+                windowId: pane.window,
+                paneId: pane.id,
+                kind: target.kind,
+                session: target.session,
+                processId: processId ?? desktop.runtimeProcess
+            )
+        } else if pane.agent == nil {
+            let prefix = ConversationAutoEntry.desktopPanePrefix(
+                desktopId: desktop.id,
+                windowId: pane.window,
+                paneId: pane.id
+            )
+            suppressedConversations = suppressedConversations.filter { !$0.hasPrefix(prefix) }
+        }
+    }
+
+    private func maybeAutoEnterSshConversation(session: ManagedTerminalSession) {
+        guard case .terminal(let curSid) = route, curSid == session.id else { return }
+        if let kind = ConversationAutoEntry.sshKind(for: session) {
+            let key = ConversationAutoEntry.sshKey(sessionId: session.id, kind: kind)
+            guard !suppressedConversations.contains(key) else { return }
+            route = .sshChat(sessionId: session.id, kind: kind)
+        } else if session.foreground?.agent == nil {
+            let prefix = ConversationAutoEntry.sshSessionPrefix(sessionId: session.id)
+            suppressedConversations = suppressedConversations.filter { !$0.hasPrefix(prefix) }
+        }
     }
 
     private func openDesktopTab(desktopId: String, tab: DesktopTab) {

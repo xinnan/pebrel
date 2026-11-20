@@ -532,8 +532,10 @@ final class SessionRepository: ObservableObject {
             return
         }
         sshForegroundTasks[id] = Task { [weak self] in
+            var firstCheck = true
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                try? await Task.sleep(nanoseconds: firstCheck ? 700_000_000 : 3_000_000_000)
+                firstCheck = false
                 guard let self, self.isForeground,
                       let conn = self.sshConnections[id], conn.isReady else { continue }
                 let client = SshAgentChatClient(scriptData: scriptData) { cmd in try await conn.query(cmd) }

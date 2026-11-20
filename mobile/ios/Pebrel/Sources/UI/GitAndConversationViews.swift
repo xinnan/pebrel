@@ -300,6 +300,7 @@ struct DesktopConversationScreen: View {
     let identity: ConversationIdentity
     @ObservedObject var repository: SessionRepository
     let onBack: () -> Void
+    let onOpenTerminal: () -> Void
     let onSwitcher: () -> Void
     let onOpenTab: (DesktopTab) -> Void
 
@@ -312,6 +313,7 @@ struct DesktopConversationScreen: View {
         identity: ConversationIdentity,
         repository: SessionRepository,
         onBack: @escaping () -> Void,
+        onOpenTerminal: @escaping () -> Void,
         onSwitcher: @escaping () -> Void,
         onOpenTab: @escaping (DesktopTab) -> Void
     ) {
@@ -320,6 +322,7 @@ struct DesktopConversationScreen: View {
         self.identity = identity
         self.repository = repository
         self.onBack = onBack
+        self.onOpenTerminal = onOpenTerminal
         self.onSwitcher = onSwitcher
         self.onOpenTab = onOpenTab
         _source = StateObject(wrappedValue: repository.makeDesktopConversation(
@@ -338,6 +341,7 @@ struct DesktopConversationScreen: View {
             source: source,
             repository: repository,
             onBack: onBack,
+            onOpenTerminal: onOpenTerminal,
             onSwitcher: onSwitcher
         )
     }
@@ -348,6 +352,7 @@ struct SshConversationScreen: View {
     let kind: String
     @ObservedObject var repository: SessionRepository
     let onBack: () -> Void
+    let onOpenTerminal: () -> Void
     let onSwitcher: () -> Void
 
     @State private var source: SshConversation?
@@ -362,11 +367,17 @@ struct SshConversationScreen: View {
                     source: source,
                     repository: repository,
                     onBack: onBack,
+                    onOpenTerminal: onOpenTerminal,
                     onSwitcher: onSwitcher
                 )
             } else {
                 VStack {
-                    PebrelPageHeader(L10n.tr("chat_title"), onBack: onBack)
+                    PebrelPageHeader(L10n.tr("chat_title"), onBack: onBack) {
+                        Button(action: onOpenTerminal) {
+                            Image(systemName: "terminal").frame(width: 34, height: 34)
+                        }
+                        .accessibilityLabel(L10n.tr("ios_session_terminal"))
+                    }
                     Spacer()
                     ProgressView()
                     Spacer()
@@ -390,6 +401,7 @@ private struct ConversationShellView<Source: ConversationSource & ObservableObje
     @ObservedObject var source: Source
     @ObservedObject var repository: SessionRepository
     let onBack: () -> Void
+    let onOpenTerminal: () -> Void
     let onSwitcher: () -> Void
 
     @State private var page = ConversationPage(identity: ConversationIdentity(kind: "", session: "", epoch: nil))
@@ -408,6 +420,10 @@ private struct ConversationShellView<Source: ConversationSource & ObservableObje
                 if !immersive {
                     PebrelPageHeader(title, subtitle: subtitle, onBack: onBack) {
                         HStack(spacing: 4) {
+                            Button(action: onOpenTerminal) {
+                                Image(systemName: "terminal").frame(width: 34, height: 34)
+                            }
+                            .accessibilityLabel(L10n.tr("ios_session_terminal"))
                             Button { immersive = true } label: {
                                 Image(systemName: "arrow.up.left.and.arrow.down.right").frame(width: 34, height: 34)
                             }

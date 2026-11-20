@@ -444,6 +444,52 @@ final class PebrelCoreTests: XCTestCase {
             ["https://example.com/arch.png"]
         )
     }
+
+    func testConversationAutoEntryDetectionAndSuppressionKeys() {
+        func makePane(agent: DesktopAgentInfo?) -> DesktopPane {
+            DesktopPane(
+                id: 9,
+                window: 1,
+                title: "agy",
+                cwd: "/work",
+                runningProgram: "antigravity",
+                taskState: "idle",
+                stateChangeSeq: 1,
+                sshDestination: nil,
+                agent: agent
+            )
+        }
+
+        let agyPane = makePane(agent: DesktopAgentInfo(kind: "antigravity", displayName: "Antigravity", sessionId: "conv-1"))
+        XCTAssertEqual(
+            ConversationAutoEntry.desktopTarget(for: agyPane),
+            ConversationAutoEntry.DesktopTarget(kind: "antigravity", session: "conv-1")
+        )
+
+        // Negative cases: missing/empty sessionId, unsupported kind, or nil agent must NOT auto-enter.
+        XCTAssertNil(ConversationAutoEntry.desktopTarget(for: makePane(agent: DesktopAgentInfo(kind: "antigravity", displayName: "Antigravity", sessionId: nil))))
+        XCTAssertNil(ConversationAutoEntry.desktopTarget(for: makePane(agent: DesktopAgentInfo(kind: "claude", displayName: "Claude", sessionId: ""))))
+        XCTAssertNil(ConversationAutoEntry.desktopTarget(for: makePane(agent: DesktopAgentInfo(kind: "aider", displayName: "Aider", sessionId: "conv-2"))))
+        XCTAssertNil(ConversationAutoEntry.desktopTarget(for: makePane(agent: nil)))
+
+        // SSH auto-entry triggers only when ready and foreground reports an agent.
+        let fgClaude = SshForeground(program: "claude", cwd: "~/repo", agent: "claude", multiplexer: nil)
+        let fgShell = SshForeground(program: "zsh", cwd: "~/repo", agent: nil, multiplexer: nil)
+        XCTAssertEqual(ConversationAutoEntry.sshKind(status: "ready", foreground: fgClaude), "claude")
+        XCTAssertNil(ConversationAutoEntry.sshKind(status: "connecting", foreground: fgClaude))
+        XCTAssertNil(ConversationAutoEntry.sshKind(status: "ready", foreground: fgShell))
+        XCTAssertNil(ConversationAutoEntry.sshKind(status: "ready", foreground: nil))
+
+        // Suppression keys match their pane/session prefixes for cleanup when an agent exits.
+        let deskKey = ConversationAutoEntry.desktopKey(desktopId: "d1", windowId: 1, paneId: 9, kind: "antigravity", session: "conv-1")
+        let deskPrefix = ConversationAutoEntry.desktopPanePrefix(desktopId: "d1", windowId: 1, paneId: 9)
+        XCTAssertTrue(deskKey.hasPrefix(deskPrefix))
+        XCTAssertFalse(deskKey.hasPrefix(ConversationAutoEntry.desktopPanePrefix(desktopId: "d1", windowId: 1, paneId: 10)))
+
+        let sshKey = ConversationAutoEntry.sshKey(sessionId: "s1", kind: "claude")
+        XCTAssertTrue(sshKey.hasPrefix(ConversationAutoEntry.sshSessionPrefix(sessionId: "s1")))
+        XCTAssertFalse(sshKey.hasPrefix(ConversationAutoEntry.sshSessionPrefix(sessionId: "s2")))
+    }
 }
 
 private final class EarlyApprovalTransport: DesktopTransport {

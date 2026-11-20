@@ -304,6 +304,45 @@ class IosToolsTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 build_ios_ghostty.extract_ar_members(sym_only, root / "sym-objs")
 
+    def test_ios_app_icon_is_full_bleed_opaque_rgb_without_black_frame(self) -> None:
+        import zlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            catalog = root / "Assets.xcassets"
+            generate_ios_assets.generate_app_icon(generate_ios_assets.ROOT, catalog)
+            icon_path = catalog / "AppIcon.appiconset/AppIcon-1024.png"
+            data = icon_path.read_bytes()
+            self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
+            width, height, bit_depth, color_type, _, _, interlace = struct.unpack(">IIBBBBB", data[16:29])
+            self.assertEqual((width, height), (1024, 1024))
+            self.assertEqual(bit_depth, 8)
+            self.assertEqual(color_type, 2)  # RGB only (no alpha channel)
+            self.assertEqual(interlace, 0)
+
+            # Decompress first and middle scanlines to verify opaque titanium corners and dark central mark.
+            pos = 8
+            idat = bytearray()
+            while pos + 8 <= len(data):
+                length, ctype = struct.unpack(">I4s", data[pos : pos + 8])
+                if ctype == b"IDAT":
+                    idat.extend(data[pos + 8 : pos + 8 + length])
+                pos += 12 + length
+            raw = zlib.decompress(bytes(idat))
+            row_stride = 1 + width * 3
+            self.assertEqual(len(raw), height * row_stride)
+            # Top-left and top-right corners must match the titanium tile color (#D9DFE6), never black.
+            self.assertEqual(tuple(raw[1:4]), (217, 223, 230))
+            self.assertEqual(tuple(raw[1 + (width - 1) * 3 : 1 + width * 3]), (217, 223, 230))
+            # Center pixel must belong to the dark pebble mark (luminance well below background).
+            mid_off = (height // 2) * row_stride + 1 + (width // 2) * 3
+            self.assertLess(sum(raw[mid_off : mid_off + 3]) / 3, 100)
+
+            # Negative case: invalid PNG bytes rejected
+            bad = root / "bad.png"
+            bad.write_bytes(b"not-a-png")
+            with self.assertRaises(ValueError):
+                generate_ios_assets.render_opaque_ios_app_icon(bad, root / "out.png")
+
 
 if __name__ == "__main__":
     unittest.main()
