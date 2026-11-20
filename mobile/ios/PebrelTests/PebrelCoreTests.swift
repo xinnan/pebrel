@@ -1,4 +1,5 @@
 import Darwin
+import Network
 import XCTest
 @testable import Pebrel
 
@@ -275,6 +276,14 @@ final class PebrelCoreTests: XCTestCase {
         XCTAssertEqual(DesktopFailureClassifier.classify(timedOut), .timeout)
         let refused = NSError(domain: NSPOSIXErrorDomain, code: Int(ECONNREFUSED))
         XCTAssertEqual(DesktopFailureClassifier.classify(refused), .refused)
+
+        XCTAssertEqual(DesktopFailureClassifier.classify(NWError.tls(-9807), relayReached: false), .tls)
+        XCTAssertEqual(DesktopFailureClassifier.classify(NWError.posix(.ECONNREFUSED), relayReached: false), .refused)
+        XCTAssertEqual(DesktopFailureClassifier.classify(NWError.posix(.ETIMEDOUT), relayReached: false), .timeout)
+        XCTAssertEqual(DesktopFailureClassifier.classify(NWError.posix(.ECONNRESET), relayReached: true), .disconnected)
+        XCTAssertEqual(DesktopFailureClassifier.fromNWWebSocketClose(.protocolCode(.policyViolation)), .protocol)
+        XCTAssertEqual(DesktopFailureClassifier.fromNWWebSocketClose(.protocolCode(.messageTooBig)), .protocol)
+        XCTAssertEqual(DesktopFailureClassifier.fromNWWebSocketClose(.protocolCode(.normalClosure)), .disconnected)
     }
 
     func testDesktopConversationSupportsAntigravityAgent() {

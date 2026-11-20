@@ -41,6 +41,7 @@ final class RelayTransport: NSObject, DesktopTransport {
     private(set) var activeProfile: RelayProfile
 
     private let maxFrameBytes = 2 * 1024 * 1024 + 1024
+    private var pinnedSocket: PinnedWebSocketClient?
     private var urlSession: URLSession?
     private var wsTask: URLSessionWebSocketTask?
     private var tlsDelegate: PinnedTlsSessionDelegate?
@@ -76,7 +77,43 @@ final class RelayTransport: NSObject, DesktopTransport {
             throw DesktopFailure(.protocol)
         }
 
-        let delegate = PinnedTlsSessionDelegate(expectedPin: activeProfile.tlsPin, expectedHost: host)
+        if activeProfile.version == 2 {
+            self.secureSession = SecureRelaySession(
+                profile: activeProfile,
+                sendBinary: { [weak self] bytes in
+                    guard let self else { throw DesktopFailure(.disconnected) }
+                    try await self.sendBinaryData(bytes)
+                },
+                deliverFrame: { [weak self] frame in
+                    self?.onFrame?(frame)
+                },
+                onEnrolled: { [weak self] updated in
+                    self?.activeProfile = updated
+                    self?.onEnrolled?(updated)
+                }
+            )
+        }
+
+        if let tlsPin = activeProfile.tlsPin {
+            // Use Network.framework + BoringSSL verify_block for all SPKI-pinned endpoints
+            // (LAN, Tailscale 100.64.0.0/10, and self-hosted relays) so ATS and Apple's public-PKI
+            // 825-day/EKU rules never interfere with rcgen self-signed certificates.
+            let client = PinnedWebSocketClient(
+                url: url,
+                expectedPin: tlsPin,
+                expectedHost: host,
+                headers: [("Authorization", "Bearer \(activeProfile.token)")],
+                maxFrameBytes: maxFrameBytes
+            )
+            self.pinnedSocket = client
+            try await client.open(timeoutSeconds: 15)
+            self.relayReached = true
+            startHeartbeat()
+            startReceiving()
+            return
+        }
+
+        let delegate = PinnedTlsSessionDelegate(expectedPin: nil, expectedHost: host)
         self.tlsDelegate = delegate
 
         let config = URLSessionConfiguration.ephemeral
@@ -92,23 +129,6 @@ final class RelayTransport: NSObject, DesktopTransport {
         let ws = session.webSocketTask(with: request)
         ws.maximumMessageSize = maxFrameBytes
         self.wsTask = ws
-
-        if activeProfile.version == 2 {
-            self.secureSession = SecureRelaySession(
-                profile: activeProfile,
-                sendBinary: { [weak self] bytes in
-                    guard let self, let task = self.wsTask else { throw DesktopFailure(.disconnected) }
-                    try await task.send(.data(bytes))
-                },
-                deliverFrame: { [weak self] frame in
-                    self?.onFrame?(frame)
-                },
-                onEnrolled: { [weak self] updated in
-                    self?.activeProfile = updated
-                    self?.onEnrolled?(updated)
-                }
-            )
-        }
 
         // Wait for actual WebSocket HTTP 101 upgrade completion via URLSessionWebSocketDelegate
         // instead of sending a premature Ping frame before the server finishes authentication setup.
@@ -146,8 +166,18 @@ final class RelayTransport: NSObject, DesktopTransport {
         startReceiving()
     }
 
+    private func sendBinaryData(_ bytes: Data) async throws {
+        if let pinnedSocket {
+            try await pinnedSocket.sendBinary(bytes)
+        } else if let ws = wsTask {
+            try await ws.send(.data(bytes))
+        } else {
+            throw DesktopFailure(.disconnected)
+        }
+    }
+
     func send(_ frame: [String: Any]) async throws {
-        guard !isClosed(), let ws = wsTask else {
+        guard !isClosed(), (pinnedSocket != nil || wsTask != nil) else {
             throw DesktopFailure(.disconnected)
         }
         if activeProfile.version == 2 {
@@ -168,7 +198,13 @@ final class RelayTransport: NSObject, DesktopTransport {
             throw DesktopFailure(.protocol)
         }
         let text = String(decoding: data, as: UTF8.self)
-        try await ws.send(.string(text))
+        if let pinnedSocket {
+            try await pinnedSocket.sendText(text)
+        } else if let ws = wsTask {
+            try await ws.send(.string(text))
+        } else {
+            throw DesktopFailure(.disconnected)
+        }
     }
 
     func close() {
@@ -183,6 +219,8 @@ final class RelayTransport: NSObject, DesktopTransport {
         receiveTask = nil
         secureSession?.close()
         secureSession = nil
+        pinnedSocket?.close()
+        pinnedSocket = nil
         wsTask?.cancel(with: .normalClosure, reason: nil)
         wsTask = nil
         urlSession?.invalidateAndCancel()
@@ -200,12 +238,22 @@ final class RelayTransport: NSObject, DesktopTransport {
         pingTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 25_000_000_000)
-                guard let self, !self.isClosed(), let ws = self.wsTask else { return }
-                let failed: Bool = await withCheckedContinuation { cont in
-                    ws.sendPing { err in cont.resume(returning: err != nil) }
-                }
-                if failed {
-                    self.fail(.network)
+                guard let self, !self.isClosed() else { return }
+                if let pinned = self.pinnedSocket {
+                    let ok = await pinned.sendPing()
+                    if !ok {
+                        self.fail(.network)
+                        return
+                    }
+                } else if let ws = self.wsTask {
+                    let failed: Bool = await withCheckedContinuation { cont in
+                        ws.sendPing { err in cont.resume(returning: err != nil) }
+                    }
+                    if failed {
+                        self.fail(.network)
+                        return
+                    }
+                } else {
                     return
                 }
             }
@@ -215,6 +263,27 @@ final class RelayTransport: NSObject, DesktopTransport {
     private func startReceiving() {
         receiveTask = Task { [weak self] in
             guard let self else { return }
+            if let pinned = self.pinnedSocket {
+                while !Task.isCancelled && !self.isClosed() {
+                    do {
+                        let message = try await pinned.receive()
+                        switch message {
+                        case .text(let text):
+                            try await self.handleTextMessage(text)
+                        case .data(let bytes):
+                            try await self.handleBinaryMessage(bytes)
+                        }
+                    } catch let failure as DesktopFailure {
+                        self.fail(failure.kind)
+                        return
+                    } catch {
+                        if self.isClosed() { return }
+                        self.fail(DesktopFailureClassifier.classify(error, relayReached: self.relayReached))
+                        return
+                    }
+                }
+                return
+            }
             while !Task.isCancelled && !self.isClosed() {
                 guard let ws = self.wsTask else { return }
                 do {
@@ -241,56 +310,62 @@ final class RelayTransport: NSObject, DesktopTransport {
     private func handleMessage(_ message: URLSessionWebSocketTask.Message) async throws {
         switch message {
         case .string(let text):
-            guard text.utf8.count <= maxFrameBytes,
-                  let data = text.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let type = obj["type"] as? String else {
-                throw DesktopFailure(.protocol)
-            }
-            if activeProfile.version == 2 {
-                guard (obj["version"] as? Int) == 2 else { throw DesktopFailure(.protocol) }
-            }
-            switch type {
-            case "relay.waiting":
-                return
-            case "relay.paired":
-                guard linkEpoch == nil,
-                      let epoch = obj["link"] as? String,
-                      !epoch.isEmpty, epoch.count <= 80 else {
-                    throw DesktopFailure(.protocol)
-                }
-                if activeProfile.version == 2 && !RelayProfile.isValidIdentifier(epoch) {
-                    throw DesktopFailure(.protocol)
-                }
-                linkEpoch = epoch
-                if activeProfile.version == 2 {
-                    try await secureSession?.paired(epoch: epoch)
-                }
-            case "relay.peer_left":
-                throw DesktopFailure(.peerOffline)
-            case "relay.data":
-                guard activeProfile.version == 1,
-                      let epoch = obj["link"] as? String,
-                      epoch == linkEpoch,
-                      let body = obj["body"] as? [String: Any] else {
-                    throw DesktopFailure(.protocol)
-                }
-                onFrame?(body)
-            default:
-                throw DesktopFailure(.protocol)
-            }
-
+            try await handleTextMessage(text)
         case .data(let bytes):
-            guard activeProfile.version == 2,
-                  bytes.count >= 1, bytes.count <= 65535,
-                  let secureSession else {
-                throw DesktopFailure(.protocol)
-            }
-            try await secureSession.receiveBinary(bytes)
-
+            try await handleBinaryMessage(bytes)
         @unknown default:
             throw DesktopFailure(.protocol)
         }
+    }
+
+    private func handleTextMessage(_ text: String) async throws {
+        guard text.utf8.count <= maxFrameBytes,
+              let data = text.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = obj["type"] as? String else {
+            throw DesktopFailure(.protocol)
+        }
+        if activeProfile.version == 2 {
+            guard (obj["version"] as? Int) == 2 else { throw DesktopFailure(.protocol) }
+        }
+        switch type {
+        case "relay.waiting":
+            return
+        case "relay.paired":
+            guard linkEpoch == nil,
+                  let epoch = obj["link"] as? String,
+                  !epoch.isEmpty, epoch.count <= 80 else {
+                throw DesktopFailure(.protocol)
+            }
+            if activeProfile.version == 2 && !RelayProfile.isValidIdentifier(epoch) {
+                throw DesktopFailure(.protocol)
+            }
+            linkEpoch = epoch
+            if activeProfile.version == 2 {
+                try await secureSession?.paired(epoch: epoch)
+            }
+        case "relay.peer_left":
+            throw DesktopFailure(.peerOffline)
+        case "relay.data":
+            guard activeProfile.version == 1,
+                  let epoch = obj["link"] as? String,
+                  epoch == linkEpoch,
+                  let body = obj["body"] as? [String: Any] else {
+                throw DesktopFailure(.protocol)
+            }
+            onFrame?(body)
+        default:
+            throw DesktopFailure(.protocol)
+        }
+    }
+
+    private func handleBinaryMessage(_ bytes: Data) async throws {
+        guard activeProfile.version == 2,
+              bytes.count >= 1, bytes.count <= 65535,
+              let secureSession else {
+            throw DesktopFailure(.protocol)
+        }
+        try await secureSession.receiveBinary(bytes)
     }
 
     private func fail(_ kind: DesktopFailureKind) {

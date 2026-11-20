@@ -30,27 +30,23 @@ enum PairingCodeLookup {
             throw PairingCodeError.invalidInvitation
         }
 
-        let delegate = PinnedTlsSessionDelegate(expectedPin: computer.pin, expectedHost: host)
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 5
-        config.timeoutIntervalForResource = 12
-        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
-
-        var request = URLRequest(url: url, timeoutInterval: 5)
-        request.setValue(nil, forHTTPHeaderField: "Origin")
-        let ws = session.webSocketTask(with: request)
-        ws.maximumMessageSize = 16384
-        ws.resume()
-        defer { ws.cancel(with: .normalClosure, reason: nil) }
+        let client = PinnedWebSocketClient(
+            url: url,
+            expectedPin: computer.pin,
+            expectedHost: host,
+            headers: [],
+            maxFrameBytes: 16384
+        )
+        defer { client.close() }
 
         do {
+            try await client.open(timeoutSeconds: 5)
             let payload = try JSONSerialization.data(withJSONObject: ["code": code])
             let text = String(decoding: payload, as: UTF8.self)
-            try await ws.send(.string(text))
+            try await client.sendText(text)
 
-            let received = try await ws.receive()
-            guard case .string(let replyText) = received,
+            let received = try await client.receive()
+            guard case .text(let replyText) = received,
                   replyText.utf8.count <= 16384,
                   let replyData = replyText.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: replyData) as? [String: Any] else {
@@ -75,10 +71,9 @@ enum PairingCodeLookup {
             return profile
         } catch let err as PairingCodeError {
             throw err
+        } catch let failure as DesktopFailure {
+            throw PairingCodeError.failed(failure.kind)
         } catch {
-            if let pinErr = delegate.pinFailure {
-                throw PairingCodeError.failed(pinErr)
-            }
             throw PairingCodeError.failed(DesktopFailureClassifier.classify(error))
         }
     }

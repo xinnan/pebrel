@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Network
 
 enum DesktopFailureKind: String, Equatable {
     case dns = "desktop_dns"
@@ -76,8 +77,39 @@ enum DesktopFailureClassifier {
         }
     }
 
+    static func fromNWWebSocketClose(_ closeCode: NWProtocolWebSocket.CloseCode?) -> DesktopFailureKind {
+        guard let closeCode else { return .disconnected }
+        switch closeCode {
+        case .protocolCode(.policyViolation), .protocolCode(.messageTooBig):
+            return .protocol
+        default:
+            return .disconnected
+        }
+    }
+
+    static func classify(_ error: NWError, relayReached: Bool = false) -> DesktopFailureKind {
+        switch error {
+        case .dns:
+            return .dns
+        case .tls:
+            return relayReached ? .network : .tls
+        case .posix(let code):
+            switch code {
+            case .ETIMEDOUT: return .timeout
+            case .ECONNREFUSED: return .refused
+            case .EHOSTUNREACH, .ENETUNREACH, .EHOSTDOWN, .ENETDOWN: return .network
+            case .ECONNRESET, .ENOTCONN, .EPIPE, .ECONNABORTED:
+                return relayReached ? .disconnected : .network
+            default: return .network
+            }
+        @unknown default:
+            return relayReached ? .network : .unknown
+        }
+    }
+
     static func classify(_ error: Error, relayReached: Bool = false) -> DesktopFailureKind {
         if let f = error as? DesktopFailure { return f.kind }
+        if let nwError = error as? NWError { return classify(nwError, relayReached: relayReached) }
         if let urlError = error as? URLError {
             switch urlError.code {
             case .cannotFindHost, .dnsLookupFailed: return .dns
