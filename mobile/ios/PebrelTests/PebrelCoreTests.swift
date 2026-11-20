@@ -1,5 +1,6 @@
 import Darwin
 import Network
+import SwiftUI
 import XCTest
 @testable import Pebrel
 
@@ -322,6 +323,126 @@ final class PebrelCoreTests: XCTestCase {
         XCTAssertEqual(pane?.agent?.kind, "antigravity")
         XCTAssertEqual(pane?.agent?.displayName, "Antigravity")
         XCTAssertEqual(pane?.agent?.sessionId, "021267b4-1ed5-4421-be03-c4d2054f5cae")
+    }
+
+    func testChatMarkdownBlockParsingCoversRichStructures() {
+        let md = """
+        # Summary ##
+
+        > Outer quote
+        > > Nested quote
+
+        1. First step
+           ```swift
+           let x = 1
+           ```
+        2. Second step
+          - [ ] Pending task
+          - [x] Done task
+
+        | Name | Expr | Count |
+        | :--- | :---: | ---: |
+        | `a | b` | x \\| y | 42 |
+
+        ---
+
+        $$E = mc^2$$
+
+        ```mermaid
+        graph TD
+          A --> B
+        ```
+        """
+        let doc = ChatMarkdownParser.parse(md)
+        XCTAssertTrue(doc.hasRichContent)
+        XCTAssertTrue(doc.hasCodeOrTable)
+        XCTAssertEqual(doc.blocks.count, 7)
+
+        XCTAssertEqual(doc.blocks[0], .heading(level: 1, text: "Summary"))
+        XCTAssertEqual(
+            doc.blocks[1],
+            .quote([
+                .paragraph("Outer quote"),
+                .quote([.paragraph("Nested quote")]),
+            ])
+        )
+        XCTAssertEqual(
+            doc.blocks[2],
+            .list(ordered: true, start: 1, items: [
+                ChatMarkdownListItem(checked: nil, blocks: [
+                    .paragraph("First step"),
+                    .code(language: "swift", code: "let x = 1"),
+                ]),
+                ChatMarkdownListItem(checked: nil, blocks: [
+                    .paragraph("Second step"),
+                    .list(ordered: false, start: 1, items: [
+                        ChatMarkdownListItem(checked: false, blocks: [.paragraph("Pending task")]),
+                        ChatMarkdownListItem(checked: true, blocks: [.paragraph("Done task")]),
+                    ]),
+                ]),
+            ])
+        )
+        XCTAssertEqual(
+            doc.blocks[3],
+            .table(
+                headers: ["Name", "Expr", "Count"],
+                alignments: [.leading, .center, .trailing],
+                rows: [["`a | b`", "x | y", "42"]]
+            )
+        )
+        XCTAssertEqual(doc.blocks[4], .rule)
+        XCTAssertEqual(doc.blocks[5], .math("E = mc^2"))
+        XCTAssertEqual(doc.blocks[6], .code(language: "mermaid", code: "graph TD\n  A --> B"))
+
+        // Streaming unclosed code fence must still parse cleanly as a code block.
+        let streaming = ChatMarkdownParser.parse("```rust\nfn main() {")
+        XCTAssertEqual(streaming.blocks, [.code(language: "rust", code: "fn main() {")])
+        XCTAssertTrue(streaming.hasCodeOrTable)
+        XCTAssertFalse(streaming.hasRichContent)
+    }
+
+    func testChatMarkdownInlineFormattingMathGuardsAndLinkSafety() {
+        let style = ChatInlineStyle(
+            baseFont: .body,
+            codeFont: .system(.callout, design: .monospaced),
+            foregroundColor: .primary,
+            linkColor: .blue,
+            codeBackground: .gray.opacity(0.2),
+            mathBackground: .blue.opacity(0.1),
+            imageLabel: "Open image"
+        )
+
+        // Currency must NOT trigger math; genuine LaTeX MUST trigger math.
+        let currencyDoc = ChatMarkdownParser.parse("Price is $10 and total is $20, escaped \\$100.")
+        XCTAssertFalse(currencyDoc.hasRichContent)
+        XCTAssertFalse(ChatMarkdownInline.containsInlineMath("Cost $10+$20 or $1,234.56"))
+        XCTAssertTrue(ChatMarkdownInline.containsInlineMath("Energy $E = mc^2$ and \\(a + b\\)"))
+
+        // CJK bold, intra-word snake_case / dunder non-emphasis, and multiplication spaces.
+        let cjk = ChatMarkdownInline.render("**加粗（测试）**后面 my_var_name foo__bar__baz 2 * 3 * 4", style: style)
+        XCTAssertEqual(String(cjk.characters), "加粗（测试）后面 my_var_name foo__bar__baz 2 * 3 * 4")
+
+        // Safe vs unsafe link schemes (http/https/mailto allowed; javascript:/file: stripped of tap link).
+        XCTAssertNotNil(ChatMarkdownInline.safeLinkURL("https://example.com/docs"))
+        XCTAssertNotNil(ChatMarkdownInline.safeLinkURL("mailto:dev@example.com"))
+        XCTAssertNil(ChatMarkdownInline.safeLinkURL("javascript:alert(1)"))
+        XCTAssertNil(ChatMarkdownInline.safeLinkURL("file:///home/nan/code/pebrel/main.rs"))
+
+        let mixedLinks = ChatMarkdownInline.render(
+            "See [Docs](https://example.com) and [main.rs](file:///home/nan/main.rs) and [xss](javascript:alert(1))",
+            style: style
+        )
+        XCTAssertEqual(String(mixedLinks.characters), "See Docs and main.rs and xss")
+        let urls = mixedLinks.runs.compactMap { $0[AttributeScopes.FoundationAttributes.LinkAttribute.self]?.absoluteString }
+        XCTAssertEqual(urls, ["https://example.com"])
+
+        // Images render as text/link label without loading remote content.
+        let img = ChatMarkdownInline.render("![Arch](https://example.com/arch.png)", style: style)
+        XCTAssertEqual(String(img.characters), "Open image · Arch")
+        XCTAssertEqual(
+            img.runs.compactMap { $0[AttributeScopes.FoundationAttributes.LinkAttribute.self]?.absoluteString },
+            ["https://example.com/arch.png"]
+        )
     }
 }
 

@@ -383,6 +383,7 @@ struct SshConversationScreen: View {
 
 private struct ConversationShellView<Source: ConversationSource & ObservableObject>: View {
     @Environment(\.pebrelPalette) private var palette
+    @Environment(\.openURL) private var openURL
     let title: String
     let subtitle: String
     let draftKey: String
@@ -553,8 +554,16 @@ private struct ConversationShellView<Source: ConversationSource & ObservableObje
                     document: doc,
                     colors: palette.readerColors,
                     scrollToHeadingId: nil,
-                    onCopyCode: { idx in UIPasteboard.general.string = doc.codeBlocks[idx] },
-                    onOpenLink: { _ in }
+                    onCopyCode: { idx in
+                        if idx >= 0 && idx < doc.codeBlocks.count {
+                            UIPasteboard.general.string = doc.codeBlocks[idx]
+                        }
+                    },
+                    onOpenLink: { raw in
+                        if let url = ChatMarkdownInline.safeLinkURL(raw) {
+                            openURL(url)
+                        }
+                    }
                 )
                 .navigationTitle(title)
                 .navigationBarTitleDisplayMode(.inline)
@@ -570,17 +579,22 @@ private struct ConversationShellView<Source: ConversationSource & ObservableObje
 
     @ViewBuilder
     private func messageRow(_ msg: ConversationMessage) -> some View {
+        let codeFontFamily = repository.display.preferences.fontFamily
         switch msg.role {
         case "user":
             HStack {
                 Spacer(minLength: 44)
-                Text(msg.text)
-                    .font(.body)
-                    .foregroundStyle(palette.foreground)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(palette.primary.opacity(0.16), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                VStack(alignment: .leading, spacing: 6) {
+                    ChatMarkdownView(text: msg.text, codeFontFamily: codeFontFamily)
+                    if msg.truncated {
+                        Text(L10n.tr("chat_content_clipped"))
+                            .font(.caption)
+                            .foregroundStyle(palette.muted)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(palette.primary.opacity(0.16), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
 
         case "tool":
@@ -637,27 +651,41 @@ private struct ConversationShellView<Source: ConversationSource & ObservableObje
             .pebrelGlass(tier: .light, cornerRadius: 12)
 
         default:
+            let doc = ChatMarkdownParser.cachedParse(msg.text)
             VStack(alignment: .leading, spacing: 8) {
-                if let attr = try? AttributedString(markdown: msg.text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
-                    Text(attr)
-                        .font(.body)
-                        .foregroundStyle(palette.foreground)
-                        .textSelection(.enabled)
-                } else {
+                if doc.blocks.isEmpty {
                     Text(msg.text)
                         .font(.body)
                         .foregroundStyle(palette.foreground)
                         .textSelection(.enabled)
+                } else {
+                    ChatMarkdownView(document: doc, codeFontFamily: codeFontFamily)
                 }
 
-                if msg.text.contains("```") || msg.text.contains("$$") || msg.text.contains("\\[") || msg.text.contains("mermaid") {
-                    Button {
-                        richReaderMessage = msg
-                    } label: {
-                        Label(L10n.tr("chat_rich_reader"), systemImage: "doc.richtext")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(palette.primary)
+                if msg.truncated {
+                    Text(L10n.tr("chat_content_clipped"))
+                        .font(.caption)
+                        .foregroundStyle(palette.muted)
+                }
+
+                if doc.hasRichContent || doc.hasCodeOrTable {
+                    HStack(spacing: 8) {
+                        if doc.hasRichContent {
+                            Text(L10n.tr("chat_rich_hint"))
+                                .font(.caption)
+                                .foregroundStyle(palette.muted)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        Button {
+                            richReaderMessage = msg
+                        } label: {
+                            Label(L10n.tr("chat_rich_reader"), systemImage: "doc.richtext")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(palette.primary)
+                        }
+                        .buttonStyle(.plain)
                     }
+                    .padding(.top, 2)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
